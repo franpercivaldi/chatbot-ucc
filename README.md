@@ -4,6 +4,16 @@ Estructura creada automáticamente. Contiene un servicio `back` con FastAPI y un
 
 * Para levantarlo usar `docker compose up --build` en una consola
 
+# crea colección e indexa
+curl -X POST "http://localhost:8000/ingest/xlsx?bot_id=public-admisiones" \
+  -H "x-api-key: cambia-esto"
+
+-> Con esto lo que hacemos es la ingesta de la data, el bot_id, puede ser:
+* public-admisiones
+* interno-academico
+
+Esto para embeber los distintos xlsx, dependiendo a que bot esta dirigida cada data
+
 Desde una segunda consola podemos probar el chat con:
 ```
 # Turno 1 — fija contexto

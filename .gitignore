@@ -9,6 +9,8 @@ front/.env.*.local
 # Vite cache
 .vite/
 
+.env
+
 # Log files
 npm-debug.log*
 yarn-debug.log*
