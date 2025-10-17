@@ -1,0 +1,97 @@
+# Node.js / Frontend (Vite)
+node_modules/
+front/node_modules/
+front/dist/
+front/.env
+front/.env.local
+front/.env.*.local
+
+# Vite cache
+.vite/
+
+# Log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Production build
+dist/
+
+# Python / Backend
+back/__pycache__/
+back/*.py[cod]
+back/.pytest_cache/
+back/.mypy_cache/
+back/.venv/
+back/venv/
+back/env/
+back/.env
+back/.env.*
+back/*.egg-info/
+
+# Virtual environment folders
+venv/
+ENV/
+env/
+
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# SQLite / databases
+*.sqlite
+*.db
+**/storage/*.sqlite
+
+# Model artifacts and large files
+models/
+models/**/blobs/
+models/**/snapshots/
+*.safetensors
+*.ckpt
+*.bin
+
+# Data folders
+data/
+data/**/*.csv
+data/**/*.xlsx
+
+# Docker
+docker-compose.override.yml
+docker-compose.*.yml
+**/Dockerfile.*
+
+# IDEs and editors
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+
+# Local env files
+*.local
+
+# Misc
+*.orig
+*.bak
+# front/node_modules
+front/node_modules/

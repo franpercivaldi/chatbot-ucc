@@ -1,0 +1,28 @@
+version: "3.9"
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports: ["6333:6333", "6334:6334"]
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  back:
+    build:
+      context: ./back
+    env_file: .env
+    environment:
+      - HF_HOME=/app/models
+      - CATALOG_DB_PATH=/app/state/catalog.db
+      - CONV_DB_PATH=/app/state/conversations.db
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data:ro
+      - ./data/state:/app/state
+      - ./back/app:/app/app:rw   # hot-reload si lo combinás con --reload (dev)
+    ports: ["8000:8000"]
+    depends_on: [qdrant]
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  qdrant_data:

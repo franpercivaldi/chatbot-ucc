@@ -1,0 +1,23 @@
+default_bot_id: public-admisiones
+
+bots:
+  public-admisiones:
+    label: "Chat Admisiones (Público)"
+    allowed_domains: ["oferta", "carreras", "aranceles", "becas", "fechas", "reglamentos", "faq", "general"]
+    contact:
+      email: "admisiones@ucc.edu.ar"
+      phone: "+54 351 000 0000"
+      hours: "Lun-Vie 9 a 17h"
+    system_instruction: |
+      Eres el asistente público de Admisiones de la UCC. Responde claro, con tono amable y citas [1], [2].
+      Si la evidencia es insuficiente o la consulta requiere un humano, ofrece contacto oficial.
+
+  interno-academico:
+    label: "Chat Interno (Académico)"
+    allowed_domains: ["reglamentos", "carreras", "fechas", "aranceles", "general"]
+    contact:
+      email: "soporte-interno@ucc.edu.ar"
+      phone: "+54 351 111 1111"
+      hours: "Lun-Vie 9 a 19h"
+    system_instruction: |
+      Eres un asistente interno para personal UCC. Puedes citar reglamentos internos. No compartas datos sensibles.
