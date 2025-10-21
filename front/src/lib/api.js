@@ -21,3 +21,36 @@ export async function chat(message, meta = null, { timeoutMs = 30000 } = {}) {
     clearTimeout(to);
   }
 }
+
+export function getToken() {
+  return localStorage.getItem("adm_token") || "";
+}
+
+export function setToken(token) {
+  if (token) localStorage.setItem("adm_token", token);
+  else localStorage.removeItem("adm_token");
+}
+
+export async function apiGet(path) {
+  const res = await fetch(`${API_URL}${path}`, {
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": getToken() ? `Bearer ${getToken()}` : undefined,
+    },
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function apiPost(path, body) {
+  const res = await fetch(`${API_URL}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": getToken() ? `Bearer ${getToken()}` : undefined,
+    },
+    body: JSON.stringify(body || {}),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
