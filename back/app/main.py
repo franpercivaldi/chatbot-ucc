@@ -2,7 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 from .config import settings
-from .routes import health, chat, ingest
+from .routes import health, chat, ingest, metrics
+from app.routes import cache_admin
+from app.routes import ingest_report
 
 app = FastAPI(title="Admisiones UCC – Backend", version="0.1.0")
 
@@ -20,6 +22,9 @@ app.add_middleware(
 app.include_router(health.router, prefix="/health", tags=["health"])
 app.include_router(chat.router, prefix="/chat", tags=["chat"])
 app.include_router(ingest.router, prefix="/ingest", tags=["ingest"])
+app.include_router(metrics.router, tags=["metrics"])
+app.include_router(cache_admin.router, tags=["admin"])
+app.include_router(ingest_report.router, tags=["admin"])
 
 # Métricas
 Instrumentator().instrument(app).expose(app)

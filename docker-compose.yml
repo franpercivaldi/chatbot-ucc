@@ -15,6 +15,10 @@ services:
       - HF_HOME=/app/models
       - CATALOG_DB_PATH=/app/state/catalog.db
       - CONV_DB_PATH=/app/state/conversations.db
+      - ANALYTICS_DB_PATH=/app/state/analytics.db
+      - CACHE_DB_PATH=/app/state/cache.db
+      - CACHE_TTL_SECONDS=86400
+      - INGEST_REPORTS_PATH=/app/state/ingest_reports.jsonl
     volumes:
       - ./models:/app/models
       - ./data:/app/data:ro

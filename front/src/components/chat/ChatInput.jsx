@@ -20,6 +20,7 @@ const ChatInput = ({ onSend }) => {
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
+      setValue("")               
       handleSend()
     }
   }
