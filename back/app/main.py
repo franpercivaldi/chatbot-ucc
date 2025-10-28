@@ -1,4 +1,5 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 from .config import settings
@@ -32,3 +33,11 @@ Instrumentator().instrument(app).expose(app)
 @app.get("/")
 def root():
     return {"ok": True, "service": "admisiones-backend"}
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    # ⚠️ En prod podés ocultar detalles; por ahora nos sirve para debug
+    return JSONResponse(
+        status_code=500,
+        content={"ok": False, "error": str(exc)},
+    )

@@ -10,6 +10,7 @@ from ..rag.chunking import load_xlsx_dir, list_data_files, normalize_columns, _d
 from ..rag.retriever import upsert_records, count_points
 from ..catalog.entities import upsert_from_records
 from ..ingest.validate import validate_dataframe, save_reports_jsonl
+from ..rag.pdf_loader import load_pdf_dir
 
 router = APIRouter()
 
@@ -53,25 +54,36 @@ def ingest_preview(
     base_dir = "/app/data/xlsx"
     data_dir = os.path.join(base_dir, bot_id)  # subcarpeta por bot
     if not os.path.isdir(data_dir):
-        # fallback por si aún no separaste por bot
         data_dir = base_dir
 
-    files = list_data_files(data_dir)
-    records = load_xlsx_dir(data_dir, bot_id=bot_id) or []
+    # CSV/XLSX
+    files_x = list_data_files(data_dir)
+    records_x = load_xlsx_dir(data_dir, bot_id=bot_id) or []
 
-    counts_by_domain: Dict[str, int] = {}
+    # PDFs
+    docs_dir = os.path.join("/app", "data", "docs", bot_id)
+    if os.path.isdir(docs_dir):
+        records_p = load_pdf_dir(bot_id)
+        # listar PDFs
+        files_p = []
+        for root, _, fs in os.walk(docs_dir):
+            files_p.extend([os.path.relpath(os.path.join(root, f), docs_dir)
+                            for f in fs if f.lower().endswith(".pdf")])
+    else:
+        records_p, files_p = [], []
+
+    records = records_x + records_p
+    files = files_x + [f"(PDF) {p}" for p in sorted(files_p)]
+
+    if only_domain:
+        records = [r for r in records if (r.get("metadata", {}).get("domain") == only_domain)]
+
+    sample = records[:sample_size] if records else []
+
+    counts_by_domain = {}
     for r in records:
         d = (r.get("metadata", {}).get("domain") or "general")
         counts_by_domain[d] = counts_by_domain.get(d, 0) + 1
-
-    if only_domain:
-        sample = [r for r in records if (r.get("metadata", {}).get("domain") == only_domain)][:sample_size]
-    else:
-        sample = records[:sample_size]
-
-    # 👇 nunca null
-    if sample is None:
-        sample = []
 
     return {
         "files": files,
@@ -143,6 +155,11 @@ def ingest_xlsx(
     # 3) INGESTA real (records -> catálogo + qdrant)
     try:
         records = load_xlsx_dir(xlsx_dir, bot_id=bot_id)
+        docs_dir = os.path.join("/app", "data", "docs", bot_id)
+        
+        if os.path.isdir(docs_dir):
+            records += load_pdf_dir(bot_id)
+        
         upsert_from_records(records, bot_id=bot_id)
         total = len(records)
         if total == 0:

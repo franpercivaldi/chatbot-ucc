@@ -1,7 +1,6 @@
 from typing import List, Dict, Any, Optional
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
-from qdrant_client.http.models import Condition 
+from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, Condition 
 from uuid import uuid4
 from .embedder import get_embedding_dim, embed_texts, embed_query
 from ..config import settings
@@ -63,76 +62,71 @@ def count_points(client: QdrantClient, collection: str | None = None) -> int:
     except Exception:
         return 0
 
-def _build_filter(
-    meta,
-    *, bot_id: str,
-    allowed_domains: list[str] | None,
-    strict_period: bool,
-    required_domain: str | None = None,
-    include_facultad: bool = True,
-    include_modalidad: bool = True,
-):
+def _build_filter(meta, *, bot_id: str, allowed_domains: list[str], strict_period: bool = True,
+                  required_domain: str | None = None, allowed_org_units: list[str] | None = None):
+    
     must = [FieldCondition(key="bot_id", match=MatchValue(value=bot_id))]
+
+    # Dominios permitidos / requeridos
     if allowed_domains:
         must.append(FieldCondition(key="domain", match=MatchAny(any=allowed_domains)))
     if required_domain:
         must.append(FieldCondition(key="domain", match=MatchValue(value=required_domain)))
 
-    if meta:
-        if getattr(meta, "carrera_id", None):
-            must.append(FieldCondition(key="carrera_id", match=MatchValue(value=str(meta.carrera_id))))
-        if getattr(meta, "carrera", None) and str(meta.carrera).lower() != "general":
-            must.append(FieldCondition(key="carrera", match=MatchValue(value=str(meta.carrera))))
-        if include_facultad and getattr(meta, "facultad", None):
-            must.append(FieldCondition(key="facultad", match=MatchValue(value=str(meta.facultad))))
-        if include_modalidad and getattr(meta, "modalidad", None):
-            must.append(FieldCondition(key="modalidad", match=MatchValue(value=str(meta.modalidad))))
-        if strict_period and getattr(meta, "periodo", None):
-            must.append(FieldCondition(key="periodo", match=MatchValue(value=str(meta.periodo))))
+    # Org units (si viene). "*" = admin (no filtramos)
+    if allowed_org_units and not (len(allowed_org_units) == 1 and allowed_org_units[0] == "*"):
+        must.append(FieldCondition(key="org_unit", match=MatchAny(any=allowed_org_units)))
+
+    # Periodo (estricto solo si strict_period=True)
+    if getattr(meta, "periodo", None) and strict_period:
+        must.append(FieldCondition(key="periodo", match=MatchValue(value=str(meta.periodo))))
+
+    # Carrera ID / nombre (si vienen)
+    if getattr(meta, "carrera_id", None):
+        must.append(FieldCondition(key="carrera_id", match=MatchValue(value=str(meta.carrera_id))))
+    elif getattr(meta, "carrera", None):
+        must.append(FieldCondition(key="carrera", match=MatchValue(value=str(meta.carrera))))
+
+    # Facultad: **solo** si el usuario la dio explícitamente (no hay include_facultad)
+    if getattr(meta, "facultad", None):
+        must.append(FieldCondition(key="facultad", match=MatchValue(value=str(meta.facultad))))
+
     return Filter(must=must)
 
 def _has_domain(results, dom: str) -> bool:
     return any((sp.payload or {}).get("domain") == dom for sp in results)
 
-def search(client: QdrantClient, query: str, meta, top_k: int, *, bot_id: str, allowed_domains: Optional[list[str]], ensure_domains: Optional[list[str]] = None) -> List[Dict[str, Any]]:
+def search(client, query: str, meta, top_k: int, *, bot_id: str,
+           allowed_domains: list[str], ensure_domains: list[str] | None = None,
+           allowed_org_units: list[str] | None = None):
     ensure_domains = ensure_domains or []
     qvec = embed_query(query, model=settings.GEMINI_EMBED_MODEL)
 
-    # 1) pasada estricta (respeta periodo si viene)
-    f1 = _build_filter(meta, bot_id=bot_id, allowed_domains=allowed_domains or [], strict_period=True)
-    res1 = client.search(collection_name=settings.QDRANT_COLLECTION, query_vector=qvec, limit=top_k, with_payload=True, query_filter=f1)
+    # 1) pasada estricta
+    f1 = _build_filter(meta, bot_id=bot_id, allowed_domains=allowed_domains,
+                       strict_period=True, allowed_org_units=allowed_org_units)
+    res1 = client.search(collection_name=settings.QDRANT_COLLECTION, query_vector=qvec,
+                         limit=top_k, with_payload=True, query_filter=f1)
 
-    # 2) detectar si la query es monetaria
+    # 2) detectar intención monetaria, etc. (tu lógica existente)
     qlow = (query or "").lower()
     wants_money = any(k in qlow for k in MONETARY_KWS)
     if wants_money and "aranceles" not in ensure_domains:
         ensure_domains = ["aranceles"] + ensure_domains
 
-    # 3) para cualquier dominio "asegurado" que falte, buscamos una 2ª vez relajando período y exigiendo ese dominio
+    # 3) asegurar dominios que falten (relajando periodo)
     extra = []
     for dom in ensure_domains:
         if not _has_domain(res1, dom):
-            f2 = _build_filter(
-                meta,
-                bot_id=bot_id,
-                allowed_domains=allowed_domains or [],
-                strict_period=False,           # 🔓 período relajado
-                required_domain=dom,
-                include_facultad=False,        # ❌ sin facultad
-                include_modalidad=False        # ❌ sin modalidad
-            )
-            r2 = client.search(
-                collection_name=settings.QDRANT_COLLECTION,
-                query_vector=qvec,
-                limit=max(3, top_k // 2),
-                with_payload=True,
-                query_filter=f2
-            )
+            f2 = _build_filter(meta, bot_id=bot_id, allowed_domains=allowed_domains,
+                               strict_period=False, required_domain=dom,
+                               allowed_org_units=allowed_org_units)
+            r2 = client.search(collection_name=settings.QDRANT_COLLECTION, query_vector=qvec,
+                               limit=max(3, top_k // 2), with_payload=True, query_filter=f2)
             extra.extend(r2)
 
-    # 4) merge + dedupe por chunk_id/point_uuid
-    seen = set()
-    merged = []
+    # 4) merge + dedupe (igual)
+    seen, merged = set(), []
     for sp in (res1 + extra):
         payload = sp.payload or {}
         ck = payload.get("chunk_id") or payload.get("point_uuid")
@@ -141,8 +135,8 @@ def search(client: QdrantClient, query: str, meta, top_k: int, *, bot_id: str, a
         seen.add(ck)
         merged.append(sp)
 
-    # 5) salida (igual que antes)
-    out: List[Dict[str, Any]] = []
+    # 5) salida
+    out = []
     for sp in merged[:top_k]:
         payload = sp.payload or {}
         out.append({
