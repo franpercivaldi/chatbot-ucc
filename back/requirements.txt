@@ -18,3 +18,4 @@ tiktoken
 rapidfuzz==3.10.0
 PyYAML
 pymupdf==1.24.9
+pdfplumber==0.11.4

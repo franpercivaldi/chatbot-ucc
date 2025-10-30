@@ -1,6 +1,6 @@
 import os
 import traceback
-from typing import Dict
+from typing import Dict, List
 import pandas as pd
 from fastapi import APIRouter, Depends, Query
 
@@ -45,34 +45,44 @@ def _read_any(path: str) -> Dict[str, pd.DataFrame]:
     return {sheet: xls.parse(sheet_name=sheet) for sheet in xls.sheet_names}
 
 
+# ============ PREVIEW ============
 @router.get("/preview")
 def ingest_preview(
     bot_id: str = Query("public-admisiones"),
+    source: str = Query("all", pattern="^(all|xlsx|docs)$"),
     only_domain: str | None = Query(None),
     sample_size: int = Query(10, ge=1, le=200),
 ):
-    base_dir = "/app/data/xlsx"
-    data_dir = os.path.join(base_dir, bot_id)  # subcarpeta por bot
-    if not os.path.isdir(data_dir):
-        data_dir = base_dir
+    # Rutas base
+    xlsx_dir_try = os.path.join("/app", "data", "xlsx", bot_id)
+    xlsx_dir_fallback = "/app/data/xlsx"
+    docs_dir = os.path.join("/app", "data", "docs", bot_id)
+
+    # Resolución de carpeta de planillas
+    data_dir = xlsx_dir_try if os.path.isdir(xlsx_dir_try) else (xlsx_dir_fallback if os.path.isdir(xlsx_dir_fallback) else None)
+
+    # Registros y archivos
+    records: List[Dict] = []
+    files_x: List[str] = []
+    files_p: List[str] = []
 
     # CSV/XLSX
-    files_x = list_data_files(data_dir)
-    records_x = load_xlsx_dir(data_dir, bot_id=bot_id) or []
+    if source in ("all", "xlsx") and data_dir:
+        files_x = list_data_files(data_dir)
+        records_x = load_xlsx_dir(data_dir, bot_id=bot_id) or []
+        records.extend(records_x)
 
     # PDFs
-    docs_dir = os.path.join("/app", "data", "docs", bot_id)
-    if os.path.isdir(docs_dir):
-        records_p = load_pdf_dir(bot_id)
+    if source in ("all", "docs") and os.path.isdir(docs_dir):
+        records_p = load_pdf_dir(bot_id) or []
+        records.extend(records_p)
         # listar PDFs
-        files_p = []
         for root, _, fs in os.walk(docs_dir):
-            files_p.extend([os.path.relpath(os.path.join(root, f), docs_dir)
-                            for f in fs if f.lower().endswith(".pdf")])
-    else:
-        records_p, files_p = [], []
+            files_p.extend([
+                os.path.relpath(os.path.join(root, f), docs_dir)
+                for f in fs if f.lower().endswith(".pdf")
+            ])
 
-    records = records_x + records_p
     files = files_x + [f"(PDF) {p}" for p in sorted(files_p)]
 
     if only_domain:
@@ -80,7 +90,7 @@ def ingest_preview(
 
     sample = records[:sample_size] if records else []
 
-    counts_by_domain = {}
+    counts_by_domain: Dict[str, int] = {}
     for r in records:
         d = (r.get("metadata", {}).get("domain") or "general")
         counts_by_domain[d] = counts_by_domain.get(d, 0) + 1
@@ -91,100 +101,117 @@ def ingest_preview(
         "sample": sample,
         "total_records": len(records),
         "bot_id": bot_id,
+        "source": source,
     }
 
 
-@router.post("/xlsx")
-def ingest_xlsx(
+# ============ INGESTA GENERAL ============
+@router.post("/run")
+def ingest_run(
     _: None = Depends(admin_key),
     client = Depends(get_qdrant),
     bot_id: str = Query("public-admisiones"),
+    source: str = Query("all", pattern="^(all|xlsx|docs)$"),
 ):
-    # 1) Ubicación de datos
-    xlsx_dir = os.path.join("/app", "data", "xlsx", bot_id)
-    if not os.path.isdir(xlsx_dir):
-        return {"ok": False, "msg": f"No existe {xlsx_dir}"}
+    # Paths
+    xlsx_dir_try = os.path.join("/app", "data", "xlsx", bot_id)
+    xlsx_dir_fallback = "/app/data/xlsx"
+    docs_dir = os.path.join("/app", "data", "docs", bot_id)
 
-    files = list_data_files(xlsx_dir)
-    if not files:
-        return {"ok": True, "msg": f"No se encontraron archivos en {xlsx_dir}", "indexed": 0}
-
-    # 2) VALIDACIÓN (por archivo/hoja) + guardado de reportes JSONL
+    records: List[Dict] = []
+    files_xlsx: List[str] = []
+    files_pdf: List[str] = []
     file_reports = []
-    try:
-        for fname in files:
-            path = os.path.join(xlsx_dir, fname)
+
+    # ---------- 1) Planillas (xlsx/csv) ----------
+    if source in ("all", "xlsx"):
+        if os.path.isdir(xlsx_dir_try):
+            xlsx_dir = xlsx_dir_try
+        elif os.path.isdir(xlsx_dir_fallback):
+            xlsx_dir = xlsx_dir_fallback
+        else:
+            xlsx_dir = None
+
+        if xlsx_dir:
+            files_xlsx = list_data_files(xlsx_dir)
+
+            # VALIDACIÓN (no bloqueante)
             try:
-                sheets = _read_any(path)
+                for fname in files_xlsx:
+                    path = os.path.join(xlsx_dir, fname)
+                    try:
+                        sheets = _read_any(path)
+                    except Exception:
+                        from ..ingest.validate import Problem, FileReport
+                        file_reports.append(FileReport(
+                            bot_id=bot_id, file=fname, sheet="(open-error)", domain="general", rows=0,
+                            problems=[Problem(level="error", code="file_open_error",
+                                              msg=f"No se pudo abrir el archivo {fname}")]
+                        ))
+                        continue
+
+                    for sheet_name, df in (sheets or {}).items():
+                        if df is None or df.empty:
+                            continue
+                        df_norm = normalize_columns(df).dropna(how="all").fillna("")
+                        domain = _domain_from_name_and_cols(fname, sheet_name, df_norm)
+                        try:
+                            rep = validate_dataframe(bot_id=bot_id, file=fname, sheet=sheet_name, domain=domain, df=df_norm)
+                            file_reports.append(rep)
+                        except Exception:
+                            from ..ingest.validate import Problem, FileReport
+                            file_reports.append(FileReport(
+                                bot_id=bot_id, file=fname, sheet=sheet_name, domain=domain, rows=len(df_norm),
+                                problems=[Problem(level="error", code="validation_exception",
+                                                  msg="Excepción durante la validación de esta hoja")]
+                            ))
+                if file_reports:
+                    save_reports_jsonl(REPORTS_PATH, file_reports)
             except Exception:
-                # si no se puede abrir el archivo, lo reportamos como error de archivo
-                from ..ingest.validate import Problem, FileReport
-                file_reports.append(FileReport(
-                    bot_id=bot_id, file=fname, sheet="(open-error)", domain="general", rows=0,
-                    problems=[Problem(level="error", code="file_open_error",
-                                      msg=f"No se pudo abrir el archivo {fname}")]
-                ))
-                continue
+                pass
 
-            for sheet_name, df in (sheets or {}).items():
-                if df is None or df.empty:
-                    continue
-                # normalizar columnas y dominio
-                df_norm = normalize_columns(df).dropna(how="all").fillna("")
-                domain = _domain_from_name_and_cols(fname, sheet_name, df_norm)
-                try:
-                    rep = validate_dataframe(
-                        bot_id=bot_id, file=fname, sheet=sheet_name, domain=domain, df=df_norm
-                    )
-                    file_reports.append(rep)
-                except Exception:
-                    # no romper ingesta si falla el validador en alguna hoja
-                    from ..ingest.validate import Problem, FileReport
-                    file_reports.append(FileReport(
-                        bot_id=bot_id, file=fname, sheet=sheet_name, domain=domain, rows=len(df_norm),
-                        problems=[Problem(level="error", code="validation_exception",
-                                          msg="Excepción durante la validación de esta hoja")]
-                    ))
-        # persistimos reportes
-        if file_reports:
-            save_reports_jsonl(REPORTS_PATH, file_reports)
-    except Exception:
-        # nunca impedir la ingesta por la validación
-        pass
+            # INGESTA de planillas
+            if files_xlsx:
+                records += load_xlsx_dir(xlsx_dir, bot_id=bot_id) or []
 
-    # 3) INGESTA real (records -> catálogo + qdrant)
-    try:
-        records = load_xlsx_dir(xlsx_dir, bot_id=bot_id)
-        docs_dir = os.path.join("/app", "data", "docs", bot_id)
-        
-        if os.path.isdir(docs_dir):
-            records += load_pdf_dir(bot_id)
-        
-        upsert_from_records(records, bot_id=bot_id)
-        total = len(records)
-        if total == 0:
-            return {
-                "ok": True,
-                "msg": "No se encontraron filas válidas en los archivos",
-                "indexed": 0,
-                "archivos": files,
-                "bot_id": bot_id,
-                "validation": {
-                    "reports_saved": len(file_reports),
-                    "reports_path": REPORTS_PATH
-                }
+    # ---------- 2) PDFs ----------
+    if source in ("all", "docs") and os.path.isdir(docs_dir):
+        records += load_pdf_dir(bot_id) or []
+        for root, _, fs in os.walk(docs_dir):
+            files_pdf.extend([
+                os.path.relpath(os.path.join(root, f), docs_dir)
+                for f in fs if f.lower().endswith(".pdf")
+            ])
+
+    # ---------- 3) Si no hay nada, devolvemos mensaje claro ----------
+    if not records:
+        return {
+            "ok": False,
+            "msg": f"No hay archivos para ingerir (xlsx_dir='{xlsx_dir_try if os.path.isdir(xlsx_dir_try) else xlsx_dir_fallback}', docs_dir='{docs_dir}')",
+            "archivos": files_xlsx + [f"(PDF) {p}" for p in sorted(files_pdf)],
+            "bot_id": bot_id,
+            "source": source,
+            "validation": {
+                "reports_saved": len(file_reports),
+                "reports_path": REPORTS_PATH
             }
+        }
 
+    # ---------- 4) Upserts (catálogo + vectores) ----------
+    try:
+        upsert_from_records(records, bot_id=bot_id)
         upsert_records(client, records, collection=settings.QDRANT_COLLECTION)
         cnt = count_points(client, settings.QDRANT_COLLECTION)
+
         return {
             "ok": True,
             "msg": "Ingesta completada",
-            "found_rows": total,
+            "found_rows": len(records),
             "collection": settings.QDRANT_COLLECTION,
             "count_now": cnt,
-            "archivos": files,
+            "archivos": files_xlsx + [f"(PDF) {p}" for p in sorted(files_pdf)],
             "bot_id": bot_id,
+            "source": source,
             "validation": {
                 "reports_saved": len(file_reports),
                 "reports_path": REPORTS_PATH
@@ -195,6 +222,18 @@ def ingest_xlsx(
         return {"ok": False, "msg": f"Error en ingesta: {e.__class__.__name__}: {e}", "trace": tb}
 
 
+# ============ ALIAS LEGACY ============
+@router.post("/xlsx")
+def ingest_xlsx_legacy(
+    _: None = Depends(admin_key),
+    client = Depends(get_qdrant),
+    bot_id: str = Query("public-admisiones"),
+):
+    # Alias hacia /run con source=all
+    return ingest_run(_, client, bot_id, source="all")
+
+
+# ============ RESET ============
 @router.delete("/reset")
 def ingest_reset(_: None = Depends(admin_key), client = Depends(get_qdrant)):
     try:
