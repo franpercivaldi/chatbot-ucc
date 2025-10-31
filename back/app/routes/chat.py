@@ -41,7 +41,9 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
 
     # --- Org units (V1: header; V2: JWT) ---
     org_hdr = request.headers.get("x-org-units")
-    allowed_org_units = _parse_org_units_header(org_hdr) or ["general"]
+    # Solo aplicamos org_units para bots que usan ese concepto (interno)
+    use_org_units = (bot_id != "public-admisiones")  # o leé un flag del profile si querés
+    allowed_org_units = (_parse_org_units_header(org_hdr) or ["general"]) if use_org_units else None
 
     # --- Intención, contexto, meta ---
     intent_res = detect_intent(user_text)  # -> intent, ensure_domains

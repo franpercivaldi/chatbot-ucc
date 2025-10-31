@@ -1,11 +1,15 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
-import { setToken, getToken } from "@/lib/api";
+import { setToken } from "@/lib/api";
 
 // Roles ejemplo: "admin", "staff", "viewer"
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null); // {name, role, token}
+   const [user, setUser] = useState({
+    name: "Demo User",
+    role: "staff",
+    orgUnits: ["rrhh", "general"], // ⬅️ acá ajustas lo que quieras probar
+  });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {

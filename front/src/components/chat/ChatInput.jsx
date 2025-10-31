@@ -47,7 +47,7 @@ const ChatInput = ({ onSend }) => {
       <div className="flex-shrink-0">
         <Button
           onClick={handleSend}
-          loading={isLoading}
+          isLoading={isLoading}
           disabled={!value.trim()}
           aria-label="Enviar mensaje"
           size="md"
