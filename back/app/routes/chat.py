@@ -26,6 +26,24 @@ def _parse_org_units_header(h: str | None) -> list[str] | None:
     vals = [x.strip() for x in h.split(",") if x.strip()]
     return [slugify(v) for v in vals] if vals else None
 
+
+def _prioritize_by_domain(docs, intent: str | None):
+    """Para intents de perfil, forzamos que los dominios más relevantes queden arriba.
+    Orden sugerido: perfiles > carreras > oferta > todo lo demás.
+    """
+    if not docs:
+        return docs
+    if intent != "info_carrera":
+        return docs
+
+    order = {"perfiles": 0, "carreras": 1, "oferta": 2}
+
+    def _key(d):
+        dom = (d.get("metadata") or {}).get("domain") or "zzz"
+        return (order.get(str(dom).lower(), 99))
+
+    return sorted(docs, key=_key)
+
 @router.post("/", response_model=ChatResponse)
 def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
     # --- Defaults seguros ---
@@ -74,12 +92,20 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
     if not meta.periodo:
         meta.periodo = _infer_periodo_from_text(user_text) or slot_periodo
 
+    # Si hay una carrera detectada (en el turno o en contexto), aseguramos dominios clave
+    ensure_domains = list(intent_res.ensure_domains or [])
+    has_carrera = bool(meta.carrera or meta.carrera_id or slot_carrera_name or slot_carrera_id)
+    if has_carrera:
+        for dom in ("perfiles", "carreras"):
+            if dom not in ensure_domains:
+                ensure_domains.append(dom)
+
     try:
         # --- Retrieve con filtro por org_unit ---
         raw_hits = search(
             client, user_text, meta=meta, top_k=settings.RAG_TOP_K,
             bot_id=bot_id, allowed_domains=allowed_domains,
-            ensure_domains=intent_res.ensure_domains,
+            ensure_domains=ensure_domains,
             allowed_org_units=allowed_org_units,
         )
 
@@ -126,7 +152,14 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
                                 retrieval_debug=retrieval_debug if req.debug else None)
 
         # --- Rerank ---
-        final_docs = rerank(user_text, raw_hits, top_k=settings.RAG_RERANK_K)
+        final_docs = rerank(
+            user_text,
+            raw_hits,
+            top_k=settings.RAG_RERANK_K,
+            intent=intent_res.intent,
+            ensure_domains=ensure_domains,
+        )
+        final_docs = _prioritize_by_domain(final_docs, intent_res.intent)
 
         # --- Prompt & generación ---
         prompt = build_prompt(

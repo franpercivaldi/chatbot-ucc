@@ -3,7 +3,7 @@ bots:
   public-admisiones:
     use_org_units: false
     label: Chat Admisiones (Público)
-    allowed_domains: [general, oferta, carreras, aranceles, becas, fechas, reglamentos, faq]
+    allowed_domains: [general, oferta, carreras, aranceles, becas, fechas, reglamentos, faq, perfiles]
     system_instruction: |
       Eres el asistente público de Admisiones de la UCC. Responde claro, con tono amable y citas [1], [2].
       Si la evidencia es insuficiente o la consulta requiere un humano, ofrece contacto oficial.

@@ -138,6 +138,10 @@ def ingest_run(
             # VALIDACIÓN (no bloqueante)
             try:
                 for fname in files_xlsx:
+                    # Skip JSON files for validation as _read_any doesn't support them
+                    if fname.lower().endswith(".json"):
+                        continue
+
                     path = os.path.join(xlsx_dir, fname)
                     try:
                         sheets = _read_any(path)

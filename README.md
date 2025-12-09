@@ -22,7 +22,7 @@ Desde una segunda consola podemos probar el chat con:
 curl -s -X POST http://localhost:8000/chat/ -H "Content-Type: application/json" -d '{
   "message": "Dame info de Odontología 2026",
   "bot_id": "public-admisiones",
-  "session_id": "sess-123",
+  "session_id": "sess-x",
   "debug": true
 }' | jq '{answer, debug:.retrieval_debug}'
 
@@ -30,7 +30,7 @@ curl -s -X POST http://localhost:8000/chat/ -H "Content-Type: application/json" 
 curl -s -X POST http://localhost:8000/chat/ -H "Content-Type: application/json" -d '{
   "message": "¿Qué valor tiene?",
   "bot_id": "public-admisiones",
-  "session_id": "sess-123",
+  "session_id": "sess-x",
   "debug": true
 }' | jq '{answer, debug:.retrieval_debug}'
 ```

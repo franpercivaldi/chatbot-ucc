@@ -84,11 +84,127 @@ def guess_domain(file_name: str, sheet_name: str, df: Optional[pd.DataFrame] = N
     return "general"
 
 def list_data_files(xlsx_dir: str) -> List[str]:
-    patterns = ["*.xlsx","*.XLSX","*.xls","*.XLS","*.csv","*.CSV","*.tsv","*.TSV","*.txt","*.TXT"]
+    patterns = ["*.xlsx","*.XLSX","*.xls","*.XLS","*.csv","*.CSV","*.tsv","*.TSV","*.txt","*.TXT","*.json","*.JSON"]
     files: List[str] = []
     for p in patterns:
         files.extend(glob.glob(os.path.join(xlsx_dir, p)))
     return sorted(set(os.path.basename(f) for f in files))
+
+def process_json_file(path: str, bot_id: str) -> List[Dict[str, Any]]:
+    """
+    Procesa archivos JSON específicos (como datos_generales_carreras.json).
+    Estructura esperada: Lista de objetos con "unidad" y "carreras".
+    """
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[WARN] No pude leer JSON {path}: {e}")
+        return []
+
+    records = []
+    # Si es una lista, iteramos. Si es dict, lo envolvemos.
+    items = data if isinstance(data, list) else [data]
+
+    for item in items:
+        # Caso específico: datos_generales_carreras.json tiene "unidad" y "carreras"
+        unidad = str(item.get("unidad") or "")
+        carreras = item.get("carreras", [])
+        
+        if not isinstance(carreras, list):
+            continue
+
+        for car in carreras:
+            if not isinstance(car, dict):
+                continue
+            
+            # Extracción de metadatos
+            # 1. Carrera ID
+            carrera_id = str(car.get("codigoSiucc") or car.get("carrera") or "")
+            
+            # 2. Nombre Carrera (buscar en datos_especiales o usar slug)
+            nombre_carrera = ""
+            datos_especiales = car.get("datos_especiales", [])
+            
+            # Construcción del texto y búsqueda de nombre
+            text_parts = []
+            
+            # Agregar info base si existe
+            if unidad:
+                text_parts.append(f"UNIDAD ACADÉMICA: {unidad}")
+            
+            # Agregar palabras clave al texto para mejorar retrieval
+            kws = str(car.get("palabras_clave") or "").strip()
+            if kws:
+                text_parts.append(f"PALABRAS CLAVE: {kws}")
+
+            for de in datos_especiales:
+                titulo = str(de.get("titulo") or "").strip()
+                contenido = str(de.get("contenido") or "").strip()
+                
+                if not titulo or not contenido:
+                    continue
+                
+                # Detectar nombre carrera
+                if "nombre de la carrera" in titulo.lower():
+                    nombre_carrera = contenido
+                
+                text_parts.append(f"{titulo.upper()}: {contenido}")
+            
+            # Fallback nombre carrera
+            if not nombre_carrera:
+                nombre_carrera = str(car.get("carrera") or "Desconocida")
+
+            # 3. Periodo (General por defecto para info estática)
+            periodo = "general"
+
+            # 4. Domain (Usamos 'perfiles' para diferenciar de CSVs administrativos)
+            domain = "perfiles"
+            
+            # Slug de carrera para facilitar búsqueda
+            # Usamos una lista para incluir tanto el slug del nombre completo como el código corto (ej. "indumentaria-alta-moda")
+            slugs = [slugify(nombre_carrera)]
+            short_code = str(car.get("carrera") or "").strip()
+            if short_code and short_code not in slugs:
+                slugs.append(short_code)
+            
+            carrera_slug = slugs
+
+            # Construcción del record
+            full_text = " | ".join(text_parts)
+            
+            # ID determinístico
+            doc_id = make_doc_id(path, "json")
+            # Usamos carrera_id como clave primaria si existe
+            primary_key = f"{domain}:{carrera_id}:{periodo}"
+            chunk_id = make_chunk_id(doc_id, primary_key)
+
+            # Guardamos el texto también en el payload para que Qdrant lo devuelva.
+            # Sin esto, los perfiles aparecían en la búsqueda pero llegaban con texto vacío.
+            meta = {
+                "schema_version": SCHEMA_VERSION,
+                "domain": domain,
+                "tipo": domain,
+                "doc_id": doc_id,
+                "carrera": nombre_carrera,
+                "carrera_slug": carrera_slug,  # Agregamos slug explícito
+                "carrera_id": carrera_id,
+                "periodo": periodo,
+                "facultad": unidad,
+                "bot_id": bot_id,
+                "chunk_id": chunk_id,
+                "source_file": os.path.basename(path),
+                "fuente_archivo": os.path.basename(path), # Para debug consistente
+                "texto": full_text,
+                "timestamp": now_iso_utc()
+            }
+
+            records.append({
+                "texto": full_text,
+                "metadata": meta
+            })
+            
+    return records
 
 def _read_any(path: str) -> Dict[str, pd.DataFrame]:
     low = path.lower()
@@ -164,6 +280,11 @@ def load_xlsx_dir(xlsx_dir: str, *, bot_id: str = "public-admisiones") -> List[D
     records: List[Dict[str, Any]] = []
     for fname in list_data_files(xlsx_dir):
         path = os.path.join(xlsx_dir, fname)
+        
+        if fname.lower().endswith(".json"):
+            records.extend(process_json_file(path, bot_id))
+            continue
+
         try:
             sheets = _read_any(path)
         except Exception as e:

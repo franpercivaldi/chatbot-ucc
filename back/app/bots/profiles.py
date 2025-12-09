@@ -5,7 +5,8 @@ _DEFAULT = {
     "bots": {
         "public-admisiones": {
             "label": "Chat Admisiones (Público)",
-            "allowed_domains": ["general","oferta","carreras","aranceles","becas","fechas","reglamentos","faq"],
+            # Incluimos "perfiles" para habilitar la info ingresada vía JSON (datos_generales_carreras.json)
+            "allowed_domains": ["general","oferta","carreras","aranceles","becas","fechas","reglamentos","faq","perfiles","palabras_clave","link_inscripcion","datos_especiales"],
             "contact": {"email": "", "phone": "", "hours": ""},
             "system_instruction": None,
         }
@@ -13,7 +14,18 @@ _DEFAULT = {
 }
 
 def _profiles_path() -> str:
-    return os.environ.get("BOT_PROFILES_PATH", "/app/config/bot_profiles.yaml")
+    env_path = os.environ.get("BOT_PROFILES_PATH")
+    if env_path:
+        return env_path
+
+    # Prefer .yaml, pero si solo existe .yml (como en este repo), úsalo.
+    yaml_path = "/app/config/bot_profiles.yaml"
+    yml_path = "/app/config/bot_profiles.yml"
+    if os.path.isfile(yaml_path):
+        return yaml_path
+    if os.path.isfile(yml_path):
+        return yml_path
+    return yaml_path
 
 def load_profiles() -> dict:
     path = _profiles_path()

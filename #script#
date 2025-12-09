@@ -1,0 +1,5 @@
+cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -s -X POST "http://localhost:8000/ingest/run?bot_id=public-admisiones&source=xlsx" -H "x-api-key: cambia-esto"
+cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -X POST "http://localhost:8000/ingest/run?bot_id=public-admisiones&source=xlsx" -H "x-api-key: cambia-esto"
+cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -s -o /tmp/ingest_out.json -w "%{http_code}" -X POST "http://localhost:8000/ingest/run?bot_id=public-admisiones&source=xlsx" -H "x-api-key: cambia-esto"
+cat /tmp/ingest_out.json
+echo test

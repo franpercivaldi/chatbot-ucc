@@ -29,6 +29,13 @@ KWS = {
         r"\bbeca[s]?\b", r"\bdescuento[s]?\b", r"\bfinanciamien?to\b", r"\bayuda\s+econ[oó]mica\b",
         r"\bprogra?ma[s]?\s+de\s+becas\b",
     ],
+    "info_carrera": [
+        r"\bperfil\b", r"\bdescripci[oó]n\b", r"\bqu[eé]\s+hace\b", r"\bde\s+qu[eé]\s+trata\b",
+        r"\bplan\s+de\s+estudio[s]?\b", r"\bduraci[oó]n\b", r"\bt[ií]tulo[s]?\b", r"\bincumbencia[s]?\b",
+        r"\bsalida\s+laboral\b", r"\bcampo\s+ocupacional\b",
+        r"\bd[oó]nde\s+trabaja\b", r"\bdonde\s+trabaja\b", r"\b(en\s+)?qu[eé]\s+(lugar(es)?|ambito[s]?|campo[s]?)\s+trabaja\b",
+        r"\b(ambito|ámbito)\s+laboral\b", r"\b(opciones|lugares)\s+de\s+trabajo\b",
+    ],
     "handoff": [
         r"\b(hablar|charlar|comunicar(me)?)\s+con\s+(un[a]?\s+)?(humano|asesor|persona)\b",
         r"\b(telefono|tel[eé]fono|whatsapp|mail|correo)\b",
@@ -42,6 +49,7 @@ DOMAINS_BY_INTENT = {
     "requisitos": ["carreras", "reglamentos"],   # suelen vivir en carreras/reglamentos
     "reglamentos": ["reglamentos"],
     "becas": ["becas"],
+    "info_carrera": ["perfiles", "carreras"],
     # "handoff": []  # no fuerza retrieve
 }
 

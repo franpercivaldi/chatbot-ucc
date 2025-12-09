@@ -57,7 +57,8 @@ def upsert_from_records(records: List[Dict[str, Any]], bot_id: str):
     for r in records:
         md = r.get("metadata", {})
         dom = md.get("domain") or md.get("tipo") or "general"
-        if dom not in {"carreras", "oferta", "aranceles"}:
+        # Incluimos "perfiles" para que las carreras definidas en JSON también queden resolvibles.
+        if dom not in {"carreras", "oferta", "aranceles", "perfiles"}:
             continue
 
         nombre = (md.get("carrera") or md.get("titulo") or "").strip()
@@ -123,6 +124,18 @@ def upsert_from_records(records: List[Dict[str, Any]], bot_id: str):
         cx.commit()
 
 
+def _best_score(q: str, text: str) -> int:
+    """Usa dos métricas de similitud y toma la mejor.
+    Esto ayuda con consultas abreviadas como "ing agronomo" vs "ingeniería agronómica".
+    """
+    ql = (q or "").lower()
+    tl = (text or "").lower()
+    return max(
+        fuzz.partial_ratio(ql, tl),
+        fuzz.token_set_ratio(ql, tl),
+    )
+
+
 def search_candidates(bot_id: str, q: str, limit: int = 5) -> List[Dict[str, Any]]:
     ensure_schema()
     qn = (q or "").strip()
@@ -141,8 +154,10 @@ def search_candidates(bot_id: str, q: str, limit: int = 5) -> List[Dict[str, Any
                 aliases = [nombre]
 
             # mejor score entre nombre y aliases
-            best = max([fuzz.partial_ratio(qn_low, (nombre or "").lower())] +
-                       [fuzz.partial_ratio(qn_low, (a or "").lower()) for a in aliases])
+            best = max([
+                _best_score(qn_low, (nombre or "")),
+                *[_best_score(qn_low, (a or "")) for a in aliases],
+            ])
 
             items.append({
                 "carrera_id": row["carrera_id"],
@@ -156,7 +171,8 @@ def search_candidates(bot_id: str, q: str, limit: int = 5) -> List[Dict[str, Any
         items.sort(key=lambda x: x["score"], reverse=True)
         return items[:limit]
 
-def resolve_carrera(bot_id: str, q: str, threshold: int = 82) -> Optional[Dict[str, Any]]:
+def resolve_carrera(bot_id: str, q: str, threshold: int = 68) -> Optional[Dict[str, Any]]:
+    # Umbral más laxo y métrica combinada para capturar abreviaturas (ej. "ing agronomo").
     cands = search_candidates(bot_id, q, limit=5)
     if not cands:
         return None
