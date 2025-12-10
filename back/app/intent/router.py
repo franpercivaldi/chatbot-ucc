@@ -9,6 +9,10 @@ class IntentResult:
 
 # Palabras clave por intención (en minúsculas)
 KWS = {
+    "saludo": [
+        r"\bhola\b", r"\bholi\b", r"\bholis\b", r"\bbuen\s+d[ií]a\b",
+        r"\bbuenas\b", r"\bbuenas\s+tardes\b", r"\bbuenas\s+noches\b", r"\bque\s+tal\b",
+    ],
     "montos": [
         r"\b(arancel(?:es)?)\b", r"\bmatr[ií]cul[ao]\b", r"\bcuota[s]?\b", r"\bmensual(?:idad)?\b",
         r"\bvalor(?:es)?\b", r"\bprecio[s]?\b", r"\bcost[eo]s?\b", r"\bimporte[s]?\b",
@@ -44,6 +48,7 @@ KWS = {
 
 # Mapeo intención -> dominios a asegurar
 DOMAINS_BY_INTENT = {
+    "saludo": [],
     "montos": ["aranceles"],
     "fechas": ["fechas"],
     "requisitos": ["carreras", "reglamentos"],   # suelen vivir en carreras/reglamentos
@@ -55,16 +60,24 @@ DOMAINS_BY_INTENT = {
 
 def detect_intent(text: str) -> IntentResult:
     t = (text or "").lower()
+    word_count = len(t.split())
     # prioridad: handoff primero (si quiere humano, no enredar)
     for pat in KWS["handoff"]:
         if re.search(pat, t):
             return IntentResult(intent="handoff", ensure_domains=[])
 
+    # Prioridad: primero otras intenciones (evitar que "hola" intercepte consultas reales)
     for intent, pats in KWS.items():
-        if intent == "handoff":
+        if intent in ("saludo", "handoff"):
             continue
         if any(re.search(p, t) for p in pats):
             return IntentResult(intent=intent, ensure_domains=DOMAINS_BY_INTENT.get(intent, []))
+
+    # saludos cortos: solo si no detectamos otras intenciones y el turno es breve
+    if word_count <= 4:
+        for pat in KWS["saludo"]:
+            if re.search(pat, t):
+                return IntentResult(intent="saludo", ensure_domains=[])
 
     # por defecto: general
     return IntentResult(intent="general", ensure_domains=[])

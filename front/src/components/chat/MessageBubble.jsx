@@ -1,4 +1,6 @@
 import Spinner from "../ui/Spinner";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 export default function MessageBubble({
   role = "assistant",              // "user" | "assistant"
@@ -32,23 +34,24 @@ export default function MessageBubble({
             <span className={isUser ? "text-white/90" : "text-gray-600"}>pensando…</span>
           </div>
         ) : (
-          <p className={`whitespace-pre-wrap ${isUser ? "" : "text-gray-800"}`}>{text}</p>
-        )}
-
-        {/* Fuentes (sencillo y opcional) */}
-        {!isUser && !pending && sources?.length > 0 && (
-          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            {sources.map((s, i) => (
-              <div key={i} className="rounded-xl border border-gray-200 bg-gray-50 p-2 text-xs text-gray-700">
-                <div className="mb-1 font-medium text-gray-900">[{i + 1}] {s?.titulo || s?.tipo || "Fuente"}</div>
-                <div className="text-gray-600">
-                  {s?.fuente_archivo}
-                  {s?.fuente_hoja ? ` · ${s.fuente_hoja}` : ""}
-                  {s?.fuente_fila !== undefined ? ` · fila ${s.fuente_fila}` : ""}
-                </div>
-                {s?.periodo && <div className="text-gray-600">Período: {s.periodo}</div>}
-              </div>
-            ))}
+          <div
+            className={`prose prose-sm max-w-none whitespace-pre-wrap break-words ${
+              isUser ? "prose-invert text-white" : "text-gray-900"
+            }`}
+          >
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                strong: ({node, ...props}) => <strong {...props} className="font-semibold" />,
+                em: ({node, ...props}) => <em {...props} className="italic" />,
+                a: ({node, ...props}) => <a {...props} className="text-indigo-600 underline" />,
+                ul: ({node, ...props}) => <ul {...props} className="list-disc pl-5" />,
+                ol: ({node, ...props}) => <ol {...props} className="list-decimal pl-5" />,
+                li: ({node, ...props}) => <li {...props} className="my-0.5" />,
+              }}
+            >
+              {text}
+            </ReactMarkdown>
           </div>
         )}
       </div>

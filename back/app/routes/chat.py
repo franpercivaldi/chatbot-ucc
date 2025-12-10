@@ -73,6 +73,42 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
 
     meta = req.meta or ChatMeta()
 
+    # --- Saludo corto: responder sin retrieval ---
+    if intent_res.intent == "saludo":
+        answer = "Hola, soy el asistente virtual de Admisiones de la UCC. Contame en qué carrera o tema te puedo ayudar (aranceles, requisitos, fechas, becas)."
+        history.append({"role":"user", "content": user_text})
+        history.append({"role":"assistant", "content": answer})
+        save_ctx(session_id, bot_id, ctx, history)
+
+        retrieval_debug = {
+            "context_slots": ctx,
+            "used_meta": meta.dict(),
+            "intent": intent_res.intent,
+            "domains": [],
+            "files": [],
+            "org_units": allowed_org_units,
+        }
+
+        log_chat_event(
+            bot_id=bot_id,
+            session_id=session_id,
+            user_query=user_text,
+            answer=answer,
+            ctx_slots={
+                "carrera_nombre": meta.carrera or ctx.get("carrera_nombre"),
+                "carrera_id": meta.carrera_id or ctx.get("carrera_id"),
+                "periodo": meta.periodo or ctx.get("periodo"),
+                "facultad": meta.facultad or ctx.get("facultad"),
+            },
+            retrieval_debug=retrieval_debug,
+            success=True,
+            tokens_in=None,
+            tokens_out=None,
+            extra={"org_units": allowed_org_units}
+        )
+
+        return ChatResponse(answer=answer, sources=[], retrieval_debug=retrieval_debug if req.debug else None)
+
     # Detección de carrera en el turno
     det = resolve_carrera(bot_id, user_text)
     if det:
