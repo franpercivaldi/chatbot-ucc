@@ -8,6 +8,9 @@ Estructura creada automáticamente. Contiene un servicio `back` con FastAPI y un
 curl -X POST "http://localhost:8000/ingest/xlsx?bot_id=public-admisiones" \
   -H "x-api-key: cambia-esto"
 
+# para borrar la ingesta
+curl -X DELETE "http://localhost:6333/collections/admisiones"
+
 Nota: `cambia-esto` es la ADMIN_API_KEY que viene de config.py, se debe cambiar luego
 
 -> Con esto lo que hacemos es la ingesta de la data, el bot_id, puede ser:

@@ -1,11 +1,10 @@
 import { useMemo, useState } from "react";
 import ChatList from "./components/chat/ChatList";
 import ChatInput from "./components/chat/ChatInput";
-import { chat as chatApi } from "./lib/api";
+import { chatStream } from "./lib/api";
 
 export default function Chat() {
   const [messages, setMessages] = useState([]);
-  const [pending, setPending] = useState(false);
   // Cambiamos el bot por defecto a 'interno-academico' para que el frontend
   // haga requests equivalentes a tu curl de pruebas (usa X-Org-Units: general)
   const [botId, setBotId] = useState("public-admisiones");
@@ -22,41 +21,49 @@ export default function Chat() {
 
   const handleSend = async (text) => {
     const userMsg = { id: genId(), role: "user", text };
-    setMessages((prev) => [...prev, userMsg]);
-    setPending(true);
+    const asstId = genId();
+    setMessages((prev) => [
+      ...prev,
+      userMsg,
+      { id: asstId, role: "assistant", text: "pensando…", sources: [], pending: true },
+    ]);
 
-      try {
+    try {
       const meta = null;
+      let acc = "";
+      let gotFirstToken = false;
 
-      // Pedimos debug para ver retrieval_debug y poder investigar por qué no hay hits
-      const data = await chatApi(text, meta, {
+      for await (const evt of chatStream(text, meta, {
         botId,
         sessionId,
         debug: true,
-      });
-
-  // Logueamos la respuesta completa en la consola para diagnóstico rápido
-  // (el usuario pidió una solución simple sin auth)
-  console.log("/chat response:", data);
-
-      const asstMsg = {
-        id: genId(),
-        role: "assistant",
-        text: data?.answer || "No pude generar una respuesta.",
-        sources: Array.isArray(data?.sources) ? data.sources : [],
-      };
-      setMessages((prev) => [...prev, asstMsg]);
+      })) {
+        if (evt.event === "token") {
+          acc += evt.text || "";
+          const snap = acc || "…";
+          if (!gotFirstToken) {
+            gotFirstToken = true;
+          }
+          setMessages((prev) => prev.map((m) => (
+            m.id === asstId ? { ...m, text: snap, pending: false } : m
+          )));
+        } else if (evt.event === "end") {
+          const finalText = evt.answer || acc || "No pude generar una respuesta.";
+          const sources = Array.isArray(evt.sources) ? evt.sources : [];
+          setMessages((prev) => prev.map((m) => (
+            m.id === asstId ? { ...m, text: finalText, sources, pending: false } : m
+          )));
+        } else if (evt.event === "error") {
+          throw new Error(evt.error || "stream-error");
+        }
+      }
     } catch (e) {
-      const errMsg = {
-        id: genId(),
-        role: "assistant",
-        text:
-          "Hubo un problema al conectar con el backend. Revisá que el API esté en http://localhost:8000 y probá de nuevo.",
-        sources: [],
-      };
-      setMessages((prev) => [...prev, errMsg]);
-    } finally {
-      setPending(false);
+      console.error("/chat stream error", e);
+      const errText =
+        "Hubo un problema al conectar con el backend. Revisá que el API esté en http://localhost:8000 y probá de nuevo.";
+      setMessages((prev) => prev.map((m) => (
+        m.id === asstId ? { ...m, text: errText, sources: [], pending: false } : m
+      )));
     }
   };
 
@@ -88,7 +95,7 @@ export default function Chat() {
       </header>
 
       <main className="flex-1 overflow-auto">
-        <ChatList messages={messages} pending={pending} />
+        <ChatList messages={messages} />
       </main>
 
       <footer className="sticky bottom-0 z-10 bg-gradient-to-t from-gray-50 to-transparent px-3 py-3">

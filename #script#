@@ -1,12 +1,4 @@
-cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -s -X POST "http://localhost:8000/ingest/run?bot_id=public-admisiones&source=xlsx" -H "x-api-key: cambia-esto"
-cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -X POST "http://localhost:8000/ingest/run?bot_id=public-admisiones&source=xlsx" -H "x-api-key: cambia-esto"
-cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -s -o /tmp/ingest_out.json -w "%{http_code}" -X POST "http://localhost:8000/ingest/run?bot_id=public-admisiones&source=xlsx" -H "x-api-key: cambia-esto"
-cat /tmp/ingest_out.json
-echo test
-cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -s -X POST "http://localhost:8000/chat/" -H "Content-Type: application/json" -d '{"message":"que hace un ing agronomo?","bot_id":"public-admisiones","session_id":"sess-todo-ingesta-1d","debug":true}' | jq '{answer, debug:.retrieval_debug}'
-cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -s -X POST "http://localhost:8000/chat/" -H "Content-Type: application/json" -d '{"message":"que hace un ing agronomo?","bot_id":"public-admisiones","session_id":"sess-todo-ingesta-1e","debug":true}' | jq '{answer, debug:.retrieval_debug}'
-cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -s -X POST "http://localhost:8000/chat/" -H "Content-Type: application/json" -d '{"message":"que hace un ing agronomo?","bot_id":"public-admisiones","session_id":"sess-todo-ingesta-1d","debug":true}'
-cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -s -X POST "http://localhost:8000/chat/" -H "Content-Type: application/json" -d '{"message":"que hace un ing agronomo?","bot_id":"public-admisiones","session_id":"sess-todo-ingesta-1d","debug":true}'
-cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -s -X POST "http://localhost:8000/chat/" -H "Content-Type: application/json" -d '{"message":"que hace un ing agronomo?","bot_id":"public-admisiones","session_id":"sess-todo-ingesta-1d","debug":true}' | head
-cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -s -X POST "http://localhost:8000/chat/" -H "Content-Type: application/json" -d '{"message":"que hace un ing agronomo?","bot_id":"public-admisiones","session_id":"sess-todo-ingesta-1d","debug":true}' | jq '{answer, debug:.retrieval_debug}'
-cd /home/franpercivaldi/personalProyects/chatbot-ucc/back && curl -s -X POST "http://localhost:8000/chat/" -H "Content-Type: application/json" -d '{"message":"que hace un ing agronomo?","bot_id":"public-admisiones","session_id":"sess-prompt-test-1","debug":true}' | head -n 5
+pwd
+cd /home/franpercivaldi/personalProyects/chatbot-ucc && /home/franpercivaldi/personalProyects/chatbot-ucc/.venv/bin/python scripts/normalize_carreras.py
+cd /home/franpercivaldi/personalProyects/chatbot-ucc && /home/franpercivaldi/personalProyects/chatbot-ucc/.venv/bin/python scripts/normalize_datos_generales_carreras.py
+cd /home/franpercivaldi/personalProyects/chatbot-ucc && /home/franpercivaldi/personalProyects/chatbot-ucc/.venv/bin/python -c "from back.app.rag.chunking import load_xlsx_dir; import json; print(len(load_xlsx_dir('data/normalized', bot_id='public-admisiones')))"

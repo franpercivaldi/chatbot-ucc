@@ -122,3 +122,16 @@ def embed_query(text: str, model: str | None = None) -> List[float]:
         task_type="RETRIEVAL_QUERY"
     )
     return _extract_vec(resp)
+
+
+def warm_embedder() -> bool:
+    """Realiza una llamada pequeña para calentar modelo y cliente.
+
+    Devuelve True si completó sin excepciones.
+    """
+    try:
+        _ = embed_one("warmup-embed")
+        return True
+    except Exception as e:
+        print(f"[warmup] embedder fallo: {e}")
+        return False

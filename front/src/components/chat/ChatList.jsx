@@ -1,12 +1,12 @@
 import { useEffect, useRef } from "react";
 import MessageBubble from "./MessageBubble";
 
-export default function ChatList({ messages = [], pending = false }) {
+export default function ChatList({ messages = [] }) {
   const endRef = useRef(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, pending]);
+  }, [messages]);
 
   return (
     <div className="mx-auto w-full max-w-3xl px-3 py-4">
@@ -22,10 +22,9 @@ export default function ChatList({ messages = [], pending = false }) {
           role={m.role}
           text={m.text}
           sources={m.sources}
+          pending={m.pending}
         />
       ))}
-
-      {pending && <MessageBubble role="assistant" pending />}
 
       <div ref={endRef} />
     </div>

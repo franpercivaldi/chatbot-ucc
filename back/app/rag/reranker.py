@@ -14,7 +14,7 @@ def _get_model() -> CrossEncoder:
                 # Forzamos tokenizer "slow" para evitar el conversor que pide tiktoken
                 _model = CrossEncoder(
                     "BAAI/bge-reranker-base",
-                    tokenizer_args={"use_fast": False}
+                    tokenizer_kwargs={"use_fast": False}
                 )
     return _model
 
@@ -77,3 +77,14 @@ def rerank(query: str, docs: List[Dict[str, Any]], top_k: int,
             break
 
     return ordered[:top_k]
+
+
+def warm_reranker() -> bool:
+    """Carga el modelo de rerank en memoria y ejecuta un predict mínimo."""
+    try:
+        model = _get_model()
+        _ = model.predict([("warmup", "warmup doc")])
+        return True
+    except Exception as e:
+        print(f"[warmup] reranker fallo: {e}")
+        return False

@@ -18,16 +18,16 @@ def ensure_schema():
     with _lock, _conn() as cx:
         cx.execute("""
         CREATE TABLE IF NOT EXISTS carreras (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          bot_id TEXT NOT NULL,
-          carrera_id TEXT NOT NULL DEFAULT '',
-          nombre TEXT NOT NULL,
-          carrera_slug TEXT NOT NULL,
-          facultad TEXT,
-          nivel TEXT,
-          periodos TEXT,                         -- JSON
-          aliases TEXT,                          -- JSON
-          UNIQUE (bot_id, carrera_id, carrera_slug)
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_id TEXT NOT NULL,
+            carrera_id TEXT NOT NULL DEFAULT '',
+            nombre TEXT NOT NULL,
+            carrera_slug TEXT NOT NULL,
+            facultad TEXT,
+            nivel TEXT,
+            periodos TEXT,                         -- JSON
+            aliases TEXT,                          -- JSON
+            UNIQUE (bot_id, carrera_id, carrera_slug)
         );
         """)
         # si la tabla ya existía con NULLs, normalizamos y creamos índice único por si faltara
@@ -61,12 +61,19 @@ def upsert_from_records(records: List[Dict[str, Any]], bot_id: str):
         if dom not in {"carreras", "oferta", "aranceles", "perfiles"}:
             continue
 
+        carrera_id = (md.get("carrera_id") or "").strip()
+        if not carrera_id:
+            # Sin carrera_id no podemos unificar; lo dejamos pasar para evitar ruido.
+            continue
+
         nombre = (md.get("carrera") or md.get("titulo") or "").strip()
+        if not nombre:
+            # Si no vino nombre, usar alias si existe
+            extras = md.get("extras") or {}
+            nombre = str(extras.get("alias") or "").strip()
         if not nombre:
             continue
 
-        # 👇 normalizamos vacío, no NULL
-        carrera_id = (md.get("carrera_id") or "").strip()
         facultad = (md.get("facultad") or "").strip() or None
         nivel = (md.get("nivel") or md.get("nivel_estudio") or "").strip() or None
         periodo = (md.get("periodo") or "").strip() or None
@@ -78,6 +85,11 @@ def upsert_from_records(records: List[Dict[str, Any]], bot_id: str):
         for k in ("alias","alias_carrera","nombre_programa"):
             if extras.get(k):
                 aliases.add(str(extras[k]))
+        # Palabras clave o nombre corto desde perfiles normalizado
+        if md.get("nombre_corto"):
+            aliases.add(str(md.get("nombre_corto")))
+        if md.get("palabras_clave"):
+            aliases.add(str(md.get("palabras_clave")))
 
         rows.append({
             "bot_id": bot_id,
@@ -94,8 +106,8 @@ def upsert_from_records(records: List[Dict[str, Any]], bot_id: str):
         for row in rows:
             cur = cx.execute("""
                 SELECT periodos, aliases FROM carreras
-                WHERE bot_id=? AND carrera_id=? AND carrera_slug=?
-            """, (row["bot_id"], row["carrera_id"], row["carrera_slug"]))
+                WHERE bot_id=? AND carrera_id=?
+            """, (row["bot_id"], row["carrera_id"]))
             prev = cur.fetchone()
 
             new_periodos = _merge_json_array(prev["periodos"] if prev else None,
@@ -111,10 +123,10 @@ def upsert_from_records(records: List[Dict[str, Any]], bot_id: str):
                         nivel=COALESCE(?, nivel),
                         periodos=?,
                         aliases=?
-                    WHERE bot_id=? AND carrera_id=? AND carrera_slug=?
+                    WHERE bot_id=? AND carrera_id=?
                 """, (row["nombre"], row["facultad"], row["nivel"],
                       new_periodos, new_aliases,
-                      row["bot_id"], row["carrera_id"], row["carrera_slug"]))
+                      row["bot_id"], row["carrera_id"]))
             else:
                 cx.execute("""
                     INSERT INTO carreras (bot_id, carrera_id, nombre, carrera_slug, facultad, nivel, periodos, aliases)

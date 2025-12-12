@@ -1,4 +1,6 @@
+import json
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import StreamingResponse
 from ..schemas.chat import ChatRequest, ChatResponse, ChatMeta
 from ..deps import get_qdrant
 from ..bots.profiles import get_profile
@@ -6,7 +8,7 @@ from ..catalog.entities import resolve_carrera
 from ..rag.retriever import search
 from ..rag.reranker import rerank
 from ..rag.prompts import build_prompt
-from ..models.gemini_client import generate_answer
+from ..models.gemini_client import generate_answer, stream_answer
 from ..config import settings
 from ..session.store import load as load_ctx, save as save_ctx
 from ..metrics.store import log_chat_event
@@ -14,6 +16,28 @@ from ..intent.router import detect_intent
 from ..rag.schema import slugify  # para normalizar org_units
 
 router = APIRouter()
+
+
+def _sse(data: dict) -> str:
+    """Formatea un evento SSE usando la clave data."""
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _build_sources(final_docs):
+    from ..schemas.common import Source
+
+    sources = []
+    for d in final_docs:
+        m = d.get("metadata", {}) or {}
+        sources.append(Source(
+            titulo=m.get("titulo"),
+            tipo=m.get("tipo") or m.get("domain"),
+            fuente_archivo=m.get("fuente_archivo"),
+            fuente_hoja=m.get("fuente_hoja"),
+            fuente_fila=m.get("fuente_fila"),
+            periodo=m.get("periodo"),
+        ))
+    return sources
 
 def _infer_periodo_from_text(text: str) -> str | None:
     import re
@@ -230,18 +254,7 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
         save_ctx(session_id, bot_id, ctx, history)
 
         # --- Sources ---
-        from ..schemas.common import Source
-        sources = []
-        for d in final_docs:
-            m = d.get("metadata", {}) or {}
-            sources.append(Source(
-                titulo=m.get("titulo"),
-                tipo=m.get("tipo") or m.get("domain"),
-                fuente_archivo=m.get("fuente_archivo"),
-                fuente_hoja=m.get("fuente_hoja"),
-                fuente_fila=m.get("fuente_fila"),
-                periodo=m.get("periodo"),
-            ))
+        sources = _build_sources(final_docs)
 
         dbg_domains = list({(h.get("metadata") or {}).get("domain") for h in final_docs})
         dbg_files   = list({(h.get("metadata") or {}).get("fuente_archivo") for h in final_docs})
@@ -323,4 +336,336 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
             answer=ans,
             sources=[],
             retrieval_debug=retrieval_debug if req.debug else None
+        )
+
+
+@router.post("/stream")
+def chat_stream(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
+    """Versión streaming de /chat/ usando SSE (text/event-stream).
+
+    Eventos emitidos:
+    - {"event": "token", "text": "..."}
+    - {"event": "end", "answer": "...", "sources": [...], "retrieval_debug": {...}}
+    - {"event": "error", "error": "mensaje"}
+    """
+
+    safe_answer = "No pude generar una respuesta. Intentá de nuevo más tarde."
+
+    # --- Perfil del bot / dominios permitidos ---
+    bot_id, profile = get_profile(req.bot_id)
+    session_id = req.session_id or "anon"
+    allowed_domains = profile.get("allowed_domains", [])
+    user_text = (req.message or "").strip()
+
+    # --- Org units (V1: header; V2: JWT) ---
+    org_hdr = request.headers.get("x-org-units")
+    use_org_units = (bot_id != "public-admisiones")
+    allowed_org_units = (_parse_org_units_header(org_hdr) or ["general"]) if use_org_units else None
+
+    # --- Intención, contexto, meta ---
+    intent_res = detect_intent(user_text)
+    ctx, history = load_ctx(session_id, bot_id)
+    slot_carrera_id   = ctx.get("carrera_id")
+    slot_carrera_name = ctx.get("carrera_nombre")
+    slot_periodo      = ctx.get("periodo")
+    slot_facultad     = ctx.get("facultad")
+
+    meta = req.meta or ChatMeta()
+
+    # --- Saludo corto: responder sin retrieval ---
+    if intent_res.intent == "saludo":
+        answer = "Hola, soy el asistente virtual de Admisiones de la UCC. Contame en qué carrera o tema te puedo ayudar (aranceles, requisitos, fechas, becas)."
+        history.append({"role":"user", "content": user_text})
+        history.append({"role":"assistant", "content": answer})
+        save_ctx(session_id, bot_id, ctx, history)
+
+        retrieval_debug = {
+            "context_slots": ctx,
+            "used_meta": meta.dict(),
+            "intent": intent_res.intent,
+            "domains": [],
+            "files": [],
+            "org_units": allowed_org_units,
+        }
+
+        log_chat_event(
+            bot_id=bot_id,
+            session_id=session_id,
+            user_query=user_text,
+            answer=answer,
+            ctx_slots={
+                "carrera_nombre": meta.carrera or ctx.get("carrera_nombre"),
+                "carrera_id": meta.carrera_id or ctx.get("carrera_id"),
+                "periodo": meta.periodo or ctx.get("periodo"),
+                "facultad": meta.facultad or ctx.get("facultad"),
+            },
+            retrieval_debug=retrieval_debug,
+            success=True,
+            tokens_in=None,
+            tokens_out=None,
+            extra={"org_units": allowed_org_units}
+        )
+
+        def _gen_saludo():
+            yield _sse({"event": "token", "text": answer})
+            yield _sse({"event": "end", "answer": answer, "sources": [], "retrieval_debug": retrieval_debug if req.debug else None})
+
+        return StreamingResponse(
+            _gen_saludo(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Detección de carrera en el turno
+    det = resolve_carrera(bot_id, user_text)
+    if det:
+        if det.get("carrera_id"):
+            meta.carrera_id = det["carrera_id"]
+        meta.carrera = det["nombre"]
+        ctx.pop("facultad", None)
+    else:
+        if slot_carrera_id and not meta.carrera_id:
+            meta.carrera_id = slot_carrera_id
+        if slot_carrera_name and not meta.carrera:
+            meta.carrera = slot_carrera_name
+
+    if not meta.periodo:
+        meta.periodo = _infer_periodo_from_text(user_text) or slot_periodo
+
+    ensure_domains = list(intent_res.ensure_domains or [])
+    has_carrera = bool(meta.carrera or meta.carrera_id or slot_carrera_name or slot_carrera_id)
+    if has_carrera:
+        for dom in ("perfiles", "carreras"):
+            if dom not in ensure_domains:
+                ensure_domains.append(dom)
+
+    try:
+        raw_hits = search(
+            client, user_text, meta=meta, top_k=settings.RAG_TOP_K,
+            bot_id=bot_id, allowed_domains=allowed_domains,
+            ensure_domains=ensure_domains,
+            allowed_org_units=allowed_org_units,
+        )
+
+        if not raw_hits:
+            contact = profile.get("contact", {}) or {}
+            ans = "No encontré información suficiente en la base para responder con confianza."
+            if any(contact.values()):
+                ans += f" Podés escribir a {contact.get('email') or contact.get('phone') or 'Mesa de ayuda'}."
+
+            history.append({"role":"user", "content": user_text})
+            history.append({"role":"assistant", "content": ans})
+            save_ctx(session_id, bot_id, ctx, history)
+
+            retrieval_debug = {
+                "context_slots": ctx,
+                "used_meta": meta.dict(),
+                "intent": intent_res.intent,
+                "domains": [],
+                "files": [],
+                "org_units": allowed_org_units,
+            }
+
+            log_chat_event(
+                bot_id=bot_id,
+                session_id=session_id,
+                user_query=user_text,
+                answer=ans,
+                ctx_slots={
+                    "carrera_nombre": meta.carrera or ctx.get("carrera_nombre"),
+                    "carrera_id": meta.carrera_id or ctx.get("carrera_id"),
+                    "periodo": meta.periodo or ctx.get("periodo"),
+                    "facultad": meta.facultad or ctx.get("facultad"),
+                },
+                retrieval_debug=retrieval_debug,
+                success=False,
+                tokens_in=None,
+                tokens_out=None,
+                extra={"org_units": allowed_org_units}
+            )
+
+            def _gen_no_hits():
+                yield _sse({
+                    "event": "end",
+                    "answer": ans,
+                    "sources": [],
+                    "retrieval_debug": retrieval_debug if req.debug else None,
+                })
+
+            return StreamingResponse(
+                _gen_no_hits(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        final_docs = rerank(
+            user_text,
+            raw_hits,
+            top_k=settings.RAG_RERANK_K,
+            intent=intent_res.intent,
+            ensure_domains=ensure_domains,
+        )
+        final_docs = _prioritize_by_domain(final_docs, intent_res.intent)
+
+        prompt = build_prompt(
+            user_text,
+            final_docs,
+            chat_history=history[-4:],
+            context_slots={
+                "carrera_nombre": meta.carrera or slot_carrera_name,
+                "periodo": meta.periodo or slot_periodo,
+                "facultad": meta.facultad or slot_facultad,
+            },
+        )
+        system_override = profile.get("system_instruction") or None
+        sources = _build_sources(final_docs)
+
+        dbg_domains = list({(h.get("metadata") or {}).get("domain") for h in final_docs})
+        dbg_files   = list({(h.get("metadata") or {}).get("fuente_archivo") for h in final_docs})
+        retrieval_debug = {
+            "context_slots": ctx,
+            "used_meta": meta.dict(),
+            "intent": intent_res.intent,
+            "domains": dbg_domains,
+            "files": dbg_files,
+            "org_units": allowed_org_units,
+        }
+
+        need = set(intent_res.ensure_domains or [])
+        have = set(dbg_domains)
+        success = True if not need else bool(have & need)
+
+        def _gen_stream():
+            full_answer = ""
+            try:
+                for piece in stream_answer(prompt, system_instruction=system_override):
+                    full_answer += piece
+                    yield _sse({"event": "token", "text": piece})
+
+                if not full_answer:
+                    full_answer = safe_answer
+
+                # --- Actualizar contexto ---
+                if det:
+                    ctx["carrera_id"] = det.get("carrera_id") or ctx.get("carrera_id")
+                    ctx["carrera_nombre"] = det.get("nombre") or ctx.get("carrera_nombre")
+                    if det.get("facultad"):
+                        ctx["facultad"] = det["facultad"]
+                if meta.periodo:
+                    ctx["periodo"] = meta.periodo
+                if meta.facultad:
+                    ctx["facultad"] = meta.facultad
+
+                history.append({"role":"user", "content": user_text})
+                history.append({"role":"assistant", "content": full_answer[:1200]})
+                save_ctx(session_id, bot_id, ctx, history)
+
+                log_chat_event(
+                    bot_id=bot_id,
+                    session_id=session_id,
+                    user_query=user_text,
+                    answer=full_answer,
+                    ctx_slots={
+                        "carrera_nombre": meta.carrera or ctx.get("carrera_nombre"),
+                        "carrera_id": meta.carrera_id or ctx.get("carrera_id"),
+                        "periodo": meta.periodo or ctx.get("periodo"),
+                        "facultad": meta.facultad or ctx.get("facultad"),
+                    },
+                    retrieval_debug=retrieval_debug,
+                    success=success,
+                    tokens_in=None,
+                    tokens_out=None,
+                    extra={"org_units": allowed_org_units}
+                )
+
+                yield _sse({
+                    "event": "end",
+                    "answer": full_answer,
+                    "sources": [s.dict() for s in sources],
+                    "retrieval_debug": retrieval_debug if req.debug else None,
+                })
+
+            except Exception as e:
+                err_msg = f"Ocurrió un error procesando la consulta: {e}"
+                history.append({"role":"user", "content": user_text})
+                history.append({"role":"assistant", "content": err_msg})
+                save_ctx(session_id, bot_id, ctx, history)
+
+                retrieval_debug_local = {
+                    "context_slots": ctx,
+                    "used_meta": meta.dict(),
+                    "intent": getattr(intent_res, "intent", None),
+                    "domains": [],
+                    "files": [],
+                    "org_units": allowed_org_units,
+                    "error": str(e),
+                }
+
+                log_chat_event(
+                    bot_id=bot_id,
+                    session_id=session_id,
+                    user_query=user_text,
+                    answer=err_msg,
+                    ctx_slots={
+                        "carrera_nombre": meta.carrera or ctx.get("carrera_nombre"),
+                        "carrera_id": meta.carrera_id or ctx.get("carrera_id"),
+                        "periodo": meta.periodo or ctx.get("periodo"),
+                        "facultad": meta.facultad or ctx.get("facultad"),
+                    },
+                    retrieval_debug=retrieval_debug_local,
+                    success=False,
+                    tokens_in=None,
+                    tokens_out=None,
+                    extra={"org_units": allowed_org_units}
+                )
+
+                yield _sse({"event": "error", "error": str(e), "answer": err_msg})
+
+        return StreamingResponse(
+            _gen_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    except Exception as e:
+        def _gen_error():
+            err_msg = f"Ocurrió un error procesando la consulta: {e}"
+            history.append({"role":"user", "content": user_text})
+            history.append({"role":"assistant", "content": err_msg})
+            save_ctx(session_id, bot_id, ctx, history)
+
+            retrieval_debug = {
+                "context_slots": ctx,
+                "used_meta": meta.dict(),
+                "intent": getattr(intent_res, "intent", None),
+                "domains": [],
+                "files": [],
+                "org_units": allowed_org_units,
+                "error": str(e),
+            }
+
+            log_chat_event(
+                bot_id=bot_id,
+                session_id=session_id,
+                user_query=user_text,
+                answer=err_msg,
+                ctx_slots={
+                    "carrera_nombre": meta.carrera or ctx.get("carrera_nombre"),
+                    "carrera_id": meta.carrera_id or ctx.get("carrera_id"),
+                    "periodo": meta.periodo or ctx.get("periodo"),
+                    "facultad": meta.facultad or ctx.get("facultad"),
+                },
+                retrieval_debug=retrieval_debug,
+                success=False,
+                tokens_in=None,
+                tokens_out=None,
+                extra={"org_units": allowed_org_units}
+            )
+
+            yield _sse({"event": "error", "error": str(e), "answer": err_msg})
+
+        return StreamingResponse(
+            _gen_error(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

@@ -1,3 +1,4 @@
+import threading
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,6 +7,8 @@ from .config import settings
 from .routes import health, chat, ingest, metrics
 from app.routes import cache_admin
 from app.routes import ingest_report
+from .rag.embedder import warm_embedder
+from .rag.reranker import warm_reranker
 
 app = FastAPI(title="Admisiones UCC – Backend", version="0.1.0")
 
@@ -29,6 +32,18 @@ app.include_router(ingest_report.router, tags=["admin"])
 
 # Métricas
 Instrumentator().instrument(app).expose(app)
+
+
+def _run_warmups():
+    ok_embed = warm_embedder()
+    ok_rerank = warm_reranker()
+    print(f"[warmup] embedder={'ok' if ok_embed else 'fail'} reranker={'ok' if ok_rerank else 'fail'}")
+
+
+@app.on_event("startup")
+async def warmup_on_start():
+    # Ejecutamos en hilo para no bloquear el arranque del servidor.
+    threading.Thread(target=_run_warmups, daemon=True).start()
 
 @app.get("/")
 def root():

@@ -114,26 +114,12 @@ def _build_filter(meta, *, bot_id: str, allowed_domains: list[str], strict_perio
             match=MatchAny(any=[requested_period, "general"])
         ))
 
-    # Carrera ID (exact) o Carrera name/slug (use SHOULD to allow either)
+    # Carrera ID como clave fuerte; si no hay ID, usamos nombre/slug como ayuda.
     if getattr(meta, "carrera_id", None):
-        # Si tenemos ID, buscamos por ID exacto O por nombre (por si el JSON no tiene el ID correcto)
         cid = str(meta.carrera_id)
-        conds = [FieldCondition(key="carrera_id", match=MatchValue(value=cid))]
-        
-        if getattr(meta, "carrera", None):
-             val = str(meta.carrera)
-             conds.append(FieldCondition(key="carrera", match=MatchValue(value=val)))
-             try:
-                slug = slugify(val)
-                conds.append(FieldCondition(key="carrera_slug", match=MatchValue(value=slug)))
-             except Exception:
-                pass
-        
-        must.append(Filter(should=conds))
-        
+        must.append(FieldCondition(key="carrera_id", match=MatchValue(value=cid)))
     elif getattr(meta, "carrera", None):
         val = str(meta.carrera)
-        # add SHOULD conditions: match 'carrera' exact OR match 'carrera_slug' (slugified)
         should.append(FieldCondition(key="carrera", match=MatchAny(any=[val, val.lower(), val.title()])))
         try:
             slug = slugify(val)

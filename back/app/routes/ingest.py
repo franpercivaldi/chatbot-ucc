@@ -54,6 +54,7 @@ def ingest_preview(
     sample_size: int = Query(10, ge=1, le=200),
 ):
     # Rutas base
+    normalized_dir = os.path.join("/app", "data", "normalized")
     xlsx_dir_try = os.path.join("/app", "data", "xlsx", bot_id)
     xlsx_dir_fallback = "/app/data/xlsx"
     docs_dir = os.path.join("/app", "data", "docs", bot_id)
@@ -66,11 +67,18 @@ def ingest_preview(
     files_x: List[str] = []
     files_p: List[str] = []
 
-    # CSV/XLSX
-    if source in ("all", "xlsx") and data_dir:
-        files_x = list_data_files(data_dir)
-        records_x = load_xlsx_dir(data_dir, bot_id=bot_id) or []
-        records.extend(records_x)
+    # CSV/XLSX (preferimos datos normalizados si existen)
+    if source in ("all", "xlsx"):
+        candidate_dirs = []
+        if os.path.isdir(normalized_dir):
+            candidate_dirs.append(normalized_dir)
+        if data_dir:
+            candidate_dirs.append(data_dir)
+
+        for ddir in candidate_dirs:
+            files_x = list_data_files(ddir)
+            records_x = load_xlsx_dir(ddir, bot_id=bot_id) or []
+            records.extend(records_x)
 
     # PDFs
     if source in ("all", "docs") and os.path.isdir(docs_dir):
@@ -114,6 +122,7 @@ def ingest_run(
     source: str = Query("all", pattern="^(all|xlsx|docs)$"),
 ):
     # Paths
+    normalized_dir = os.path.join("/app", "data", "normalized")
     xlsx_dir_try = os.path.join("/app", "data", "xlsx", bot_id)
     xlsx_dir_fallback = "/app/data/xlsx"
     docs_dir = os.path.join("/app", "data", "docs", bot_id)
@@ -125,7 +134,10 @@ def ingest_run(
 
     # ---------- 1) Planillas (xlsx/csv) ----------
     if source in ("all", "xlsx"):
-        if os.path.isdir(xlsx_dir_try):
+        # Preferir carpeta normalizada si existe
+        if os.path.isdir(normalized_dir):
+            xlsx_dir = normalized_dir
+        elif os.path.isdir(xlsx_dir_try):
             xlsx_dir = xlsx_dir_try
         elif os.path.isdir(xlsx_dir_fallback):
             xlsx_dir = xlsx_dir_fallback

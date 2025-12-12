@@ -20,7 +20,8 @@ TYPE_PATTERNS = [
 
 DEFAULT_ALIASES = {
     "facultad": ["facultad", "unidad_academica", "escuela", "departamento", "area_estudio", "área", "area"],
-    "carrera": ["carrera", "programa", "plan", "nombre_carrera"],
+    # Incluimos carrera_nombre para soportar data/normalized/carreras.csv
+    "carrera": ["carrera", "programa", "plan", "nombre_carrera", "carrera_nombre", "carrera_nombre_raw"],
     "modalidad": ["modalidad", "cursado", "régimen", "regimen", "presencialidad", "tipo_cursado"],
     "periodo": ["periodo", "periodo_academico", "anio", "año", "anio_ingreso", "año_ingreso", "cohorte", "year", "vigencia", "año_lectivo"],
     "titulo": ["titulo", "título", "alias", "nombre", "nombre_programa"],
@@ -55,6 +56,19 @@ def _primary_key_for_row(domain: str, carrera_id: str, periodo: str, i: int, tit
     return f"{domain}:row-{i}:{p}"
 
 def _domain_from_name_and_cols(fname: str, sheet_name: str, df: Optional[pd.DataFrame]) -> str:
+    # Preferimos detectar dominios normalizados por nombre de archivo.
+    base = fname.lower()
+    if base.startswith("carreras"):
+        return "carreras"
+    if base.startswith("ofertas_carreras"):
+        return "oferta"
+    if base.startswith("aranceles_carreras"):
+        return "aranceles"
+    if base.startswith("datos_generales_carreras_normalizado"):
+        return "perfiles"
+    if base.startswith("aliases_carreras"):
+        return "carreras"
+
     d = guess_domain(fname, sheet_name, df)
     # Ajustes finos: si trae columnas de arancel → aranceles; si trae IDENTIFICADOR → carreras
     if df is not None:
@@ -90,11 +104,75 @@ def list_data_files(xlsx_dir: str) -> List[str]:
         files.extend(glob.glob(os.path.join(xlsx_dir, p)))
     return sorted(set(os.path.basename(f) for f in files))
 
+def _process_normalized_profiles(items: List[Dict[str, Any]], path: str, bot_id: str) -> List[Dict[str, Any]]:
+    """Procesa datos_generales_carreras_normalizado.json (nuevo formato normalizado)."""
+    records: List[Dict[str, Any]] = []
+    for car in items:
+        if not isinstance(car, dict):
+            continue
+
+        carrera_id = str(car.get("carrera_id") or "").strip()
+        unidad = str(car.get("unidad") or "").strip()
+        nombre_formal = str(car.get("nombre_formal") or "").strip()
+        nombre_corto = str(car.get("nombre_corto") or "").strip()
+        palabras = str(car.get("palabras_clave") or "").strip()
+        metricas = car.get("metricas") or {}
+        secciones = car.get("secciones") or []
+
+        text_parts: List[str] = []
+        if nombre_formal:
+            text_parts.append(nombre_formal)
+        if palabras:
+            text_parts.append(f"PALABRAS CLAVE: {palabras}")
+        for sec in secciones:
+            t = str(sec.get("titulo") or "").strip()
+            c = str(sec.get("contenido") or "").strip()
+            if t or c:
+                text_parts.append(f"{t}: {c}" if t else c)
+        if metricas:
+            flat = ", ".join([f"{k}={v}" for k, v in metricas.items() if v not in (None, "")])
+            if flat:
+                text_parts.append(f"METRICAS: {flat}")
+
+        full_text = " | ".join(text_parts)
+        periodo = "general"
+        domain = "perfiles"
+        nombre_base = nombre_formal or nombre_corto or "Desconocida"
+        slug = slugify(nombre_corto or nombre_formal)
+
+        doc_id = make_doc_id(path, "json")
+        primary_key = f"{domain}:{carrera_id or slug}:{periodo}"
+        chunk_id = make_chunk_id(doc_id, primary_key)
+
+        meta = {
+            "schema_version": SCHEMA_VERSION,
+            "domain": domain,
+            "tipo": domain,
+            "doc_id": doc_id,
+            "carrera": nombre_base,
+            "carrera_slug": slug,
+            "carrera_id": carrera_id,
+            "periodo": periodo,
+            "facultad": unidad,
+            "bot_id": bot_id,
+            "chunk_id": chunk_id,
+            "source_file": os.path.basename(path),
+            "fuente_archivo": os.path.basename(path),
+            "nombre_formal": nombre_formal or None,
+            "nombre_corto": nombre_corto or None,
+            "palabras_clave": palabras or None,
+            "metricas": metricas if metricas else None,
+            "texto": full_text,
+            "timestamp": now_iso_utc()
+        }
+
+        records.append({"texto": full_text, "metadata": meta})
+
+    return records
+
+
 def process_json_file(path: str, bot_id: str) -> List[Dict[str, Any]]:
-    """
-    Procesa archivos JSON específicos (como datos_generales_carreras.json).
-    Estructura esperada: Lista de objetos con "unidad" y "carreras".
-    """
+    """Procesa archivos JSON. Soporta formato legacy y formato normalizado."""
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -102,12 +180,15 @@ def process_json_file(path: str, bot_id: str) -> List[Dict[str, Any]]:
         print(f"[WARN] No pude leer JSON {path}: {e}")
         return []
 
-    records = []
-    # Si es una lista, iteramos. Si es dict, lo envolvemos.
     items = data if isinstance(data, list) else [data]
 
+    # Nuevo formato normalizado: cada item es una carrera con carrera_id
+    if items and isinstance(items[0], dict) and "carrera_id" in items[0]:
+        return _process_normalized_profiles(items, path, bot_id)
+
+    # Formato legacy (unidad -> carreras)
+    records = []
     for item in items:
-        # Caso específico: datos_generales_carreras.json tiene "unidad" y "carreras"
         unidad = str(item.get("unidad") or "")
         carreras = item.get("carreras", [])
         
@@ -119,21 +200,15 @@ def process_json_file(path: str, bot_id: str) -> List[Dict[str, Any]]:
                 continue
             
             # Extracción de metadatos
-            # 1. Carrera ID
             carrera_id = str(car.get("codigoSiucc") or car.get("carrera") or "")
             
-            # 2. Nombre Carrera (buscar en datos_especiales o usar slug)
             nombre_carrera = ""
             datos_especiales = car.get("datos_especiales", [])
             
-            # Construcción del texto y búsqueda de nombre
             text_parts = []
-            
-            # Agregar info base si existe
             if unidad:
                 text_parts.append(f"UNIDAD ACADÉMICA: {unidad}")
             
-            # Agregar palabras clave al texto para mejorar retrieval
             kws = str(car.get("palabras_clave") or "").strip()
             if kws:
                 text_parts.append(f"PALABRAS CLAVE: {kws}")
@@ -145,56 +220,41 @@ def process_json_file(path: str, bot_id: str) -> List[Dict[str, Any]]:
                 if not titulo or not contenido:
                     continue
                 
-                # Detectar nombre carrera
                 if "nombre de la carrera" in titulo.lower():
                     nombre_carrera = contenido
                 
                 text_parts.append(f"{titulo.upper()}: {contenido}")
             
-            # Fallback nombre carrera
             if not nombre_carrera:
                 nombre_carrera = str(car.get("carrera") or "Desconocida")
 
-            # 3. Periodo (General por defecto para info estática)
             periodo = "general"
-
-            # 4. Domain (Usamos 'perfiles' para diferenciar de CSVs administrativos)
             domain = "perfiles"
-            
-            # Slug de carrera para facilitar búsqueda
-            # Usamos una lista para incluir tanto el slug del nombre completo como el código corto (ej. "indumentaria-alta-moda")
             slugs = [slugify(nombre_carrera)]
             short_code = str(car.get("carrera") or "").strip()
             if short_code and short_code not in slugs:
                 slugs.append(short_code)
-            
             carrera_slug = slugs
 
-            # Construcción del record
             full_text = " | ".join(text_parts)
-            
-            # ID determinístico
             doc_id = make_doc_id(path, "json")
-            # Usamos carrera_id como clave primaria si existe
             primary_key = f"{domain}:{carrera_id}:{periodo}"
             chunk_id = make_chunk_id(doc_id, primary_key)
 
-            # Guardamos el texto también en el payload para que Qdrant lo devuelva.
-            # Sin esto, los perfiles aparecían en la búsqueda pero llegaban con texto vacío.
             meta = {
                 "schema_version": SCHEMA_VERSION,
                 "domain": domain,
                 "tipo": domain,
                 "doc_id": doc_id,
                 "carrera": nombre_carrera,
-                "carrera_slug": carrera_slug,  # Agregamos slug explícito
+                "carrera_slug": carrera_slug,
                 "carrera_id": carrera_id,
                 "periodo": periodo,
                 "facultad": unidad,
                 "bot_id": bot_id,
                 "chunk_id": chunk_id,
                 "source_file": os.path.basename(path),
-                "fuente_archivo": os.path.basename(path), # Para debug consistente
+                "fuente_archivo": os.path.basename(path),
                 "texto": full_text,
                 "timestamp": now_iso_utc()
             }
@@ -339,6 +399,9 @@ def load_xlsx_dir(xlsx_dir: str, *, bot_id: str = "public-admisiones") -> List[D
 
                 # Período: si no viene explícito, intenta del texto / nombre del archivo
                 periodo = _first_nonempty(row, cand["periodo"]) or defaults.get("periodo")
+                # Para archivos normalizados, usar anio_ingreso si existe
+                if not periodo and "anio_ingreso" in norm and norm["anio_ingreso"]:
+                    periodo = norm["anio_ingreso"]
                 if not periodo:
                     periodo = _guess_periodo_from_text(texto) or _guess_periodo_from_text(fname) or "general"
 
@@ -347,11 +410,11 @@ def load_xlsx_dir(xlsx_dir: str, *, bot_id: str = "public-admisiones") -> List[D
                 #       en 'aranceles' también intentamos CARRERA y luego ALIAS.
                 carrera_id = _first_nonempty(row, cand["carrera_id"]) or ""
                 if domain in ("carreras", "oferta"):
-                    carrera = get("carrera") or get("alias")  # primero CARRERA, luego ALIAS
+                    carrera = get("carrera") or _first_nonempty(row, ["carrera_nombre", "carrera_nombre_raw"]) or get("alias")
                 elif domain == "aranceles":
-                    carrera = get("carrera") or get("alias")
+                    carrera = get("carrera") or _first_nonempty(row, ["carrera_nombre", "carrera_nombre_raw"]) or get("alias")
                 else:
-                    carrera = _first_nonempty(row, cand["carrera"]) or get("alias")
+                    carrera = _first_nonempty(row, cand["carrera"]) or get("alias") or _first_nonempty(row, ["carrera_nombre", "carrera_nombre_raw"])
 
                 # ¡Importante!: si no hay nombre de carrera, NO pongas "general"
                 carrera = carrera if carrera and carrera.strip() else None
