@@ -1,11 +1,23 @@
 import hashlib, json, os, sqlite3, time
-from typing import List
+from typing import List, Dict
 import google.generativeai as genai
 from ..config import settings
 
 CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", "storage", "cache")
 os.makedirs(CACHE_PATH, exist_ok=True)
 DB_PATH = os.path.join(CACHE_PATH, "embeddings.sqlite")
+
+# Contadores de cache hits/misses para métricas
+_cache_stats: Dict[str, int] = {"query_hits": 0, "query_misses": 0, "doc_hits": 0, "doc_misses": 0}
+
+def get_cache_stats() -> Dict[str, int]:
+    """Retorna estadísticas de cache hits/misses."""
+    return dict(_cache_stats)
+
+def reset_cache_stats():
+    """Resetea contadores (útil para tests)."""
+    global _cache_stats
+    _cache_stats = {"query_hits": 0, "query_misses": 0, "doc_hits": 0, "doc_misses": 0}
 
 def _db():
     con = sqlite3.connect(DB_PATH)
@@ -89,8 +101,10 @@ def embed_texts(texts: List[str], model: str | None = None) -> List[List[float]]
         cur = con.execute("SELECT vec_json FROM cache WHERE key=? AND model=?", (k, model)).fetchone()
         if cur:
             out[i] = json.loads(cur[0])
+            _cache_stats["doc_hits"] += 1
         else:
             misses.append(i)
+            _cache_stats["doc_misses"] += 1
 
     now = time.time()
     for i in misses:
@@ -113,15 +127,42 @@ def get_embedding_dim() -> int:
 
 
 def embed_query(text: str, model: str | None = None) -> List[float]:
+    """
+    Embedding para queries con caché.
+    Usa task_type=RETRIEVAL_QUERY y cachea con prefijo 'q:' para diferenciar de docs.
+    """
     model = model or settings.GEMINI_EMBED_MODEL
     init_gemini()
+    
+    # Check cache (con prefijo 'q:' para diferenciar de documents)
+    cache_key = _key(f"q:{text}", model)
+    con = _db()
+    cur = con.execute("SELECT vec_json FROM cache WHERE key=? AND model=?", (cache_key, model)).fetchone()
+    if cur:
+        vec = json.loads(cur[0])
+        con.close()
+        _cache_stats["query_hits"] += 1
+        return vec
+    
+    # Cache miss: llamar a API
+    _cache_stats["query_misses"] += 1
     model_name = model if model.startswith("models/") else model
     resp = genai.embed_content(
         model=model_name,
         content=text,
         task_type="RETRIEVAL_QUERY"
     )
-    return _extract_vec(resp)
+    vec = _extract_vec(resp)
+    
+    # Guardar en cache
+    now = time.time()
+    with con:
+        con.execute(
+            "INSERT OR REPLACE INTO cache (key, model, vec_json, created_at) VALUES (?, ?, ?, ?)",
+            (cache_key, model, json.dumps(vec), now),
+        )
+    con.close()
+    return vec
 
 
 def warm_embedder() -> bool:

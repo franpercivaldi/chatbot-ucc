@@ -15,6 +15,7 @@ from ..session.store import load as load_ctx, save as save_ctx
 from ..metrics.store import log_chat_event
 from ..intent.router import detect_intent
 from ..rag.schema import slugify  # para normalizar org_units
+from ..cache.store import get_cache, put_cache
 
 router = APIRouter()
 
@@ -98,6 +99,28 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
 
     meta = req.meta or ChatMeta()
 
+    # --- Cache check: para preguntas repetidas (solo si no es saludo) ---
+    if settings.ENABLE_RESPONSE_CACHE and intent_res.intent != "saludo":
+        cache_carrera = meta.carrera or slot_carrera_name
+        cache_periodo = meta.periodo or slot_periodo
+        cached = get_cache(
+            bot_id=bot_id,
+            question=user_text,
+            carrera=cache_carrera,
+            periodo=cache_periodo,
+        )
+        if cached:
+            # Guardar en historial aunque sea cache hit
+            history.append({"role": "user", "content": user_text})
+            history.append({"role": "assistant", "content": cached.get("answer", "")[:1200]})
+            save_ctx(session_id, bot_id, ctx, history)
+            
+            return ChatResponse(
+                answer=cached.get("answer", ""),
+                sources=cached.get("sources", []),
+                retrieval_debug={"cache_hit": True, "intent": intent_res.intent} if req.debug else None,
+            )
+
     # --- Saludo corto: responder sin retrieval ---
     if intent_res.intent == "saludo":
         answer = "Hola, soy el asistente virtual de Admisiones de la UCC. Contame en qué carrera o tema te puedo ayudar (aranceles, requisitos, fechas, becas)."
@@ -167,21 +190,39 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
         ensure_domains.append("oferta")
 
     # --- Rewriter: construir query explícita y filtros ---
-    rewrite_res = rewrite_query(
-        user_message=user_text,
-        intent=intent_res.intent,
-        meta=meta,
-        ctx_slots={
-            "carrera_id": ctx.get("carrera_id") or slot_carrera_id,
-            "carrera_nombre": ctx.get("carrera_nombre") or slot_carrera_name,
-            "periodo": ctx.get("periodo") or slot_periodo,
-            "modalidad": ctx.get("modalidad"),
-            "facultad": ctx.get("facultad") or slot_facultad,
-            "ultimo_intent": ctx.get("ultimo_intent"),
-            "ultimo_domain": ctx.get("ultimo_domain"),
-        },
-        history=history[-4:],
-    )
+    # OPTIMIZACIÓN: skip rewriter para queries muy cortas/simples sin contexto complejo
+    word_count = len(user_text.split())
+    skip_threshold = getattr(settings, 'SKIP_REWRITER_THRESHOLD', 4)
+    has_context = bool(slot_carrera_id or slot_carrera_name or slot_periodo)
+    
+    if word_count <= skip_threshold and not has_context and meta.carrera:
+        # Query simple con carrera explícita: usar directo sin LLM
+        rewrite_res = {
+            "search_query": f"{user_text} {meta.carrera}" if meta.carrera else user_text,
+            "target_domain": None,
+            "carrera_id": meta.carrera_id,
+            "carrera_nombre": meta.carrera,
+            "periodo": meta.periodo,
+            "modalidad": meta.modalidad,
+            "rewriter_ok": False,
+            "skipped": True,
+        }
+    else:
+        rewrite_res = rewrite_query(
+            user_message=user_text,
+            intent=intent_res.intent,
+            meta=meta,
+            ctx_slots={
+                "carrera_id": ctx.get("carrera_id") or slot_carrera_id,
+                "carrera_nombre": ctx.get("carrera_nombre") or slot_carrera_name,
+                "periodo": ctx.get("periodo") or slot_periodo,
+                "modalidad": ctx.get("modalidad"),
+                "facultad": ctx.get("facultad") or slot_facultad,
+                "ultimo_intent": ctx.get("ultimo_intent"),
+                "ultimo_domain": ctx.get("ultimo_domain"),
+            },
+            history=history[-4:],
+        )
 
     if rewrite_res.get("carrera_id"):
         meta.carrera_id = rewrite_res.get("carrera_id")
@@ -202,12 +243,14 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
 
     try:
         # --- Retrieve con filtro por org_unit ---
-        raw_hits = search(
+        retrieval_result = search(
             client, search_query, meta=meta, top_k=settings.RAG_TOP_K,
             bot_id=bot_id, allowed_domains=allowed_domains,
             ensure_domains=ensure_domains,
             allowed_org_units=allowed_org_units,
         )
+        raw_hits = retrieval_result.get("docs", []) if isinstance(retrieval_result, dict) else retrieval_result
+        fallback_used = retrieval_result.get("fallback_used", False) if isinstance(retrieval_result, dict) else False
 
         if not raw_hits:
             # fallback early: sin resultados
@@ -230,6 +273,7 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
                 "org_units": allowed_org_units,
                 "rewriter": rewrite_res,
                 "search_query": search_query,
+                "fallback_used": fallback_used,
             }
 
             # métricas
@@ -313,6 +357,7 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
             "org_units": allowed_org_units,
             "rewriter": rewrite_res,
             "search_query": search_query,
+            "fallback_used": fallback_used,
         }
 
         # Éxito: si había dominios obligatorios por intención y no aparecieron, marcar False
@@ -338,6 +383,20 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
             tokens_out=None,
             extra={"org_units": allowed_org_units}
         )
+
+        # --- Cache store: guardar respuesta exitosa para futuras consultas ---
+        if settings.ENABLE_RESPONSE_CACHE and success:
+            try:
+                put_cache(
+                    bot_id=bot_id,
+                    question=user_text,
+                    carrera=meta.carrera or ctx.get("carrera_nombre"),
+                    periodo=meta.periodo or ctx.get("periodo"),
+                    answer=answer,
+                    sources=[s.dict() if hasattr(s, "dict") else s for s in sources],
+                )
+            except Exception:
+                pass  # No fallar si el cache falla
 
         return ChatResponse(
             answer=answer,
@@ -520,12 +579,14 @@ def chat_stream(req: ChatRequest, request: Request, client = Depends(get_qdrant)
         ensure_domains = ["aranceles"] + ensure_domains
 
     try:
-        raw_hits = search(
+        retrieval_result = search(
             client, search_query, meta=meta, top_k=settings.RAG_TOP_K,
             bot_id=bot_id, allowed_domains=allowed_domains,
             ensure_domains=ensure_domains,
             allowed_org_units=allowed_org_units,
         )
+        raw_hits = retrieval_result.get("docs", []) if isinstance(retrieval_result, dict) else retrieval_result
+        fallback_used = retrieval_result.get("fallback_used", False) if isinstance(retrieval_result, dict) else False
 
         if not raw_hits:
             contact = profile.get("contact", {}) or {}
@@ -546,6 +607,7 @@ def chat_stream(req: ChatRequest, request: Request, client = Depends(get_qdrant)
                 "org_units": allowed_org_units,
                 "rewriter": rewrite_res,
                 "search_query": search_query,
+                "fallback_used": fallback_used,
             }
 
             log_chat_event(
@@ -613,6 +675,7 @@ def chat_stream(req: ChatRequest, request: Request, client = Depends(get_qdrant)
             "org_units": allowed_org_units,
             "rewriter": rewrite_res,
             "search_query": search_query,
+            "fallback_used": fallback_used,
         }
 
         need = set(intent_res.ensure_domains or [])

@@ -4,6 +4,38 @@ Responde en español rioplatense, cálido pero conciso, con tono institucional y
 Si una respuesta depende de un período/año, aclara cuál estás usando. Si la evidencia es insuficiente, dilo con transparencia y ofrece contactar al equipo de Admisiones. No inventes datos ni políticas.
 """
 
+# Límites de tokens aproximados (1 token ≈ 4 chars en español)
+MAX_HISTORY_CHARS = 8000  # ~2000 tokens
+MAX_MSG_CHARS = 600  # ~150 tokens por mensaje
+
+
+def _compress_history(chat_history: list | None, max_chars: int = MAX_HISTORY_CHARS) -> list:
+    """
+    Comprime el historial para no exceder el límite de tokens.
+    - Trunca mensajes individuales muy largos
+    - Recorta desde el inicio si el total excede el límite
+    """
+    if not chat_history:
+        return []
+    
+    # Paso 1: truncar mensajes individuales
+    compressed = []
+    for h in chat_history:
+        role = h.get("role", "user")
+        content = (h.get("content") or "")[:MAX_MSG_CHARS]
+        if len(h.get("content", "")) > MAX_MSG_CHARS:
+            content = content.rsplit(" ", 1)[0] + "..."  # cortar en palabra
+        compressed.append({"role": role, "content": content})
+    
+    # Paso 2: si aún excede, recortar desde el inicio
+    total_chars = sum(len(h.get("content", "")) for h in compressed)
+    while total_chars > max_chars and len(compressed) > 1:
+        removed = compressed.pop(0)
+        total_chars -= len(removed.get("content", ""))
+    
+    return compressed
+
+
 def build_prompt(query: str, docs: list, chat_history: list | None = None, context_slots: dict | None = None) -> str:
     context_block = ""
     if context_slots:
@@ -16,11 +48,12 @@ def build_prompt(query: str, docs: list, chat_history: list | None = None, conte
             parts.append(f"Facultad: {context_slots['facultad']}")
         if parts:
             context_block = "Contexto actual: " + " | ".join(parts) + "\n"
+    
     hist_block = ""
     if chat_history:
-        # últimas 2-3 intervenciones resumidas
-        tail = chat_history[-4:]
-        for t in tail:
+        # Comprimir historial para no exceder límite de tokens
+        compressed = _compress_history(chat_history[-6:])  # últimos 6 turnos máx
+        for t in compressed:
             role = t.get("role","user")
             txt = t.get("content","")
             hist_block += f"{role}: {txt}\n"

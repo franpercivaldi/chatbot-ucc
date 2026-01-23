@@ -43,11 +43,16 @@ def rerank(query: str, docs: List[Dict[str, Any]], top_k: int,
     if not settings.ENABLE_RERANKER or not docs:
         return docs[:top_k]
     ensure_domains = [d.lower() for d in (ensure_domains or [])]
+    
+    # Budget limit: procesar máximo N docs para reducir latencia
+    max_docs = getattr(settings, 'RERANKER_MAX_DOCS', 15)
+    docs_to_rerank = docs[:max_docs] if len(docs) > max_docs else docs
+    
     model = _get_model()
-    pairs = [(query, d["texto"]) for d in docs]
+    pairs = [(query, d["texto"]) for d in docs_to_rerank]
     scores = model.predict(pairs).tolist()
     rescored = []
-    for d, s in zip(docs, scores):
+    for d, s in zip(docs_to_rerank, scores):
         x = dict(d)
         dom = (d.get("metadata") or {}).get("domain")
         boost = _domain_boost(dom, intent, ensure_domains)

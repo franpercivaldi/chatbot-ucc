@@ -9,6 +9,8 @@ from app.routes import cache_admin
 from app.routes import ingest_report
 from .rag.embedder import warm_embedder
 from .rag.reranker import warm_reranker
+from .cache.store import ensure_schema as ensure_cache_schema
+from .deps import get_qdrant
 
 app = FastAPI(title="Admisiones UCC – Backend", version="0.1.0")
 
@@ -35,8 +37,27 @@ Instrumentator().instrument(app).expose(app)
 
 
 def _run_warmups():
+    # 1. Cache de respuestas (crear schema SQLite)
+    try:
+        ensure_cache_schema()
+        print("[warmup] cache schema ok")
+    except Exception as e:
+        print(f"[warmup] cache schema fail: {e}")
+    
+    # 2. Qdrant connection
+    try:
+        client = get_qdrant()
+        _ = client.get_collections()
+        print("[warmup] qdrant ok")
+    except Exception as e:
+        print(f"[warmup] qdrant fail: {e}")
+    
+    # 3. Embedder (API warmup)
     ok_embed = warm_embedder()
+    
+    # 4. Reranker (model load)
     ok_rerank = warm_reranker()
+    
     print(f"[warmup] embedder={'ok' if ok_embed else 'fail'} reranker={'ok' if ok_rerank else 'fail'}")
 
 

@@ -17,6 +17,32 @@ MONETARY_KWS = [
     "cuesta", "vale"
 ]
 
+# ============ CONFIG FALLBACK ============
+# Estos valores se leen de settings pero mantenemos defaults por compatibilidad
+def _get_min_hits_threshold():
+    return getattr(settings, 'RETRIEVAL_MIN_HITS', 3)
+
+def _get_fallback_enabled():
+    return getattr(settings, 'ENABLE_RETRIEVAL_FALLBACK', True)
+
+
+# ============ HELPERS ============
+class _RelaxedMeta:
+    """Proxy que retorna None para campos restrictivos (carrera, carrera_id)."""
+    def __init__(self, original):
+        self._orig = original
+    
+    def __getattr__(self, name):
+        if name in ("carrera", "carrera_id"):
+            return None
+        return getattr(self._orig, name, None)
+
+
+def _relax_meta(meta):
+    """Crea versión relajada del meta sin carrera/carrera_id para fallback."""
+    return _RelaxedMeta(meta)
+
+
 def ensure_collection(client: QdrantClient, collection: str | None = None):
     coll = collection or settings.QDRANT_COLLECTION
     dim = get_embedding_dim()
@@ -216,6 +242,40 @@ def search(client, query: str, meta, top_k: int, *, bot_id: str,
     res1 = _qdrant_search_try(collection_name=settings.QDRANT_COLLECTION, query_vector=qvec,
                               limit=top_k, with_payload=True, query_filter=f1)
 
+    # 1.5) FALLBACK: si pocos hits, relajar filtros de carrera
+    fallback_used = False
+    min_hits = _get_min_hits_threshold()
+    if _get_fallback_enabled() and len(res1) < min_hits:
+        print(f"[retriever] Pocos hits ({len(res1)}), activando fallback sin carrera_id")
+        relaxed_meta = _relax_meta(meta)
+        f_relaxed = _build_filter(relaxed_meta, bot_id=bot_id, allowed_domains=allowed_domains,
+                                   strict_period=False, allowed_org_units=allowed_org_units)
+        res_fallback = _qdrant_search_try(
+            collection_name=settings.QDRANT_COLLECTION,
+            query_vector=qvec,
+            limit=top_k,
+            with_payload=True,
+            query_filter=f_relaxed
+        )
+        # Merge: primero los estrictos, luego los relajados (sin duplicados)
+        seen_ids = set()
+        merged_fallback = []
+        for sp in res1:
+            payload = sp.payload if hasattr(sp, "payload") else sp.get("payload", {})
+            ck = (payload or {}).get("chunk_id") or (payload or {}).get("point_uuid")
+            if ck and ck not in seen_ids:
+                seen_ids.add(ck)
+                merged_fallback.append(sp)
+        for sp in res_fallback:
+            payload = sp.payload if hasattr(sp, "payload") else sp.get("payload", {})
+            ck = (payload or {}).get("chunk_id") or (payload or {}).get("point_uuid")
+            if ck and ck not in seen_ids:
+                seen_ids.add(ck)
+                merged_fallback.append(sp)
+        res1 = merged_fallback
+        fallback_used = True
+        print(f"[retriever] Fallback completado, ahora {len(res1)} hits")
+
     # 2) detectar intención monetaria, etc. (tu lógica existente)
     qlow = (query or "").lower()
     wants_money = any(k in qlow for k in MONETARY_KWS)
@@ -296,4 +356,10 @@ def search(client, query: str, meta, top_k: int, *, bot_id: str,
             "metadata": payload,
             "score": float(s or 0.0),
         })
-    return out
+    
+    # Retornamos dict con docs + metadata de retrieval para observabilidad
+    return {
+        "docs": out,
+        "fallback_used": fallback_used,
+        "hits_total": len(out),
+    }
