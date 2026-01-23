@@ -16,7 +16,9 @@ KWS = {
     "montos": [
         r"\b(arancel(?:es)?)\b", r"\bmatr[ií]cul[ao]\b", r"\bcuota[s]?\b", r"\bmensual(?:idad)?\b",
         r"\bvalor(?:es)?\b", r"\bprecio[s]?\b", r"\bcost[eo]s?\b", r"\bimporte[s]?\b",
-        r"\bplan(?:es)?\s+de\s+pago[s]?\b", r"\bpagar\b", r"\bpagos?\b",
+           r"\bplan(?:es)?\s+de\s+pago[s]?\b", r"\bpagar\b", r"\bpagos?\b",
+           r"\bcu[aá]nt[ao]\s+sale\b", r"\bcu[aá]nt[ao]\s+cuesta\b", r"\bcu[aá]nt[ao]\s+vale\b",
+           r"\bcuesta\b", r"\bvale\b",
     ],
     "fechas": [
         r"\bfecha[s]?\b", r"\bcalendario\b", r"\binscripci[oó]n(?:es)?\b", r"\bpreinscripci[oó]n\b",

@@ -12,7 +12,9 @@ from qdrant_client.http.models import MatchAny
 MONETARY_KWS = [
     "matric", "arancel", "cuota", "mensual", "$", "pago", "plan",
     "inscrip", "inscripción", "inscripcion",
-    "valor", "precio", "costo", "coste", "importe"
+    "valor", "precio", "costo", "coste", "importe",
+    "cuanto sale", "cuánto sale", "cuanto cuesta", "cuánto cuesta", "cuanto vale", "cuánto vale",
+    "cuesta", "vale"
 ]
 
 def ensure_collection(client: QdrantClient, collection: str | None = None):
@@ -237,7 +239,8 @@ def search(client, query: str, meta, top_k: int, *, bot_id: str,
                                    limit=max(3, top_k // 2), with_payload=True, query_filter=f2)
             
             # Fallback: si falló y tenemos carrera, probamos SIN filtro de carrera
-            if not r2 and force_dom:
+            need_carrera_fallback = force_dom or (dom == "oferta" and has_carrera_meta)
+            if not r2 and need_carrera_fallback:
                 class MetaProxy:
                     def __init__(self, original):
                         self._orig = original

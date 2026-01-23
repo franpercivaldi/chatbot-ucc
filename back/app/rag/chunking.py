@@ -55,6 +55,14 @@ def _primary_key_for_row(domain: str, carrera_id: str, periodo: str, i: int, tit
         return f"{domain}:{slugify(titulo)}:{p}"
     return f"{domain}:row-{i}:{p}"
 
+
+def _normalize_carrera_id(cid: str | None) -> str:
+    """Normaliza IDs numéricos paddeando a 4 dígitos (ej. 901 -> 0901)."""
+    s = str(cid or "").strip()
+    if s.isdigit() and len(s) < 4:
+        return s.zfill(4)
+    return s
+
 def _domain_from_name_and_cols(fname: str, sheet_name: str, df: Optional[pd.DataFrame]) -> str:
     # Preferimos detectar dominios normalizados por nombre de archivo.
     base = fname.lower()
@@ -277,10 +285,12 @@ def _read_any(path: str) -> Dict[str, pd.DataFrame]:
                     sample = f.read(4096)
                 dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
                 sep = dialect.delimiter or ","
-                return {"CSV": pd.read_csv(path, encoding=enc, sep=sep)}
+                # dtype=str preserva ceros a la izquierda (ids como 0601)
+                return {"CSV": pd.read_csv(path, encoding=enc, sep=sep, dtype=str)}
             except Exception:
                 continue
-        return {"CSV": pd.read_csv(path, encoding="utf-8", sep=",", on_bad_lines="skip")}
+        # fallback seguro con dtype=str
+        return {"CSV": pd.read_csv(path, encoding="utf-8", sep=",", on_bad_lines="skip", dtype=str)}
     if low.endswith((".tsv",)):
         return {"TSV": pd.read_csv(path, sep="\t")}
     xls = pd.ExcelFile(path)
@@ -298,6 +308,30 @@ def _load_schema_map(xlsx_dir: str) -> Dict[str, Any]:
         except Exception:
             pass
     return cfg
+
+
+def _load_carrera_lookup(xlsx_dir: str) -> Dict[str, str]:
+    """Carga un mapa carrera_id -> nombre desde carreras.csv si existe.
+
+    Esto se usa para enriquecer datasets normalizados (ej. ofertas_carreras.csv)
+    que traen solo el ID de la carrera sin su nombre público, lo cual impide que
+    las consultas por nombre ("abogacia") se conecten con los registros.
+    """
+    path = os.path.join(xlsx_dir, "carreras.csv")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        df = pd.read_csv(path, dtype=str).fillna("")
+    except Exception:
+        return {}
+
+    out: Dict[str, str] = {}
+    for _, row in df.iterrows():
+        cid = _normalize_carrera_id(row.get("carrera_id"))
+        nombre = str(row.get("carrera_nombre") or row.get("carrera") or row.get("nombre_carrera") or "").strip()
+        if cid and nombre:
+            out[cid] = nombre
+    return out
 
 def _merge_aliases(user_aliases: Dict[str, List[str]]) -> Dict[str, List[str]]:
     aliases = {k: list(v) for k, v in DEFAULT_ALIASES.items()}
@@ -336,6 +370,7 @@ def load_xlsx_dir(xlsx_dir: str, *, bot_id: str = "public-admisiones") -> List[D
     cfg = _load_schema_map(xlsx_dir)
     aliases = _merge_aliases(cfg.get("aliases", {}))
     defaults = { slugify(k): str(v) for k, v in cfg.get("defaults", {}).items() }
+    carrera_lookup = _load_carrera_lookup(xlsx_dir)
 
     records: List[Dict[str, Any]] = []
     for fname in list_data_files(xlsx_dir):
@@ -408,7 +443,7 @@ def load_xlsx_dir(xlsx_dir: str, *, bot_id: str = "public-admisiones") -> List[D
                 # ---------- Carrera & Carrera ID (clave del fix) ----------
                 # Regla: en 'carreras' u 'oferta' usar CARRERA; si no hay, usar ALIAS (nombre público).
                 #       en 'aranceles' también intentamos CARRERA y luego ALIAS.
-                carrera_id = _first_nonempty(row, cand["carrera_id"]) or ""
+                carrera_id = _normalize_carrera_id(_first_nonempty(row, cand["carrera_id"])) or ""
                 if domain in ("carreras", "oferta"):
                     carrera = get("carrera") or _first_nonempty(row, ["carrera_nombre", "carrera_nombre_raw"]) or get("alias")
                 elif domain == "aranceles":
@@ -418,6 +453,13 @@ def load_xlsx_dir(xlsx_dir: str, *, bot_id: str = "public-admisiones") -> List[D
 
                 # ¡Importante!: si no hay nombre de carrera, NO pongas "general"
                 carrera = carrera if carrera and carrera.strip() else None
+
+                # En datasets normalizados (ofertas_carreras.csv) suele venir solo el ID:
+                # completamos el nombre desde carreras.csv para que las queries por nombre ("abogacia")
+                # puedan resolverse y alimentar metadata/filters.
+                if not carrera and carrera_id and carrera_id in carrera_lookup:
+                    carrera = carrera_lookup[carrera_id]
+
 
                 # ---------- IDs determinísticos ----------
                 primary_key = _primary_key_for_row(domain, (carrera_id or "").strip(), str(periodo), i, titulo)
@@ -525,6 +567,29 @@ def load_xlsx_dir(xlsx_dir: str, *, bot_id: str = "public-admisiones") -> List[D
                     "extras": extras,
                     "texto": texto,
                 }
+
+                # Si es ofertas_carreras, agregamos una versión legible con foco en curso de ingreso.
+                is_cursos_ingreso = fname.lower().startswith("ofertas_carreras")
+                if is_cursos_ingreso:
+                    curso = norm.get("cursos_ingreso") or norm.get("curso_ingreso") or ""
+                    inicio = norm.get("inicio_actividad") or norm.get("inicio") or ""
+                    readable_parts = []
+                    if curso:
+                        readable_parts.append(f"Curso de ingreso: {curso}")
+                    if inicio:
+                        readable_parts.append(f"Inicio de actividad: {inicio}")
+                    if periodo:
+                        readable_parts.append(f"Periodo: {periodo}")
+                    base_nombre = carrera or carrera_id or titulo
+                    if readable_parts:
+                        legible = f"Curso de ingreso {base_nombre}: " + " | ".join(readable_parts)
+                        texto = f"{legible} | {texto}"
+                        metadata["texto"] = texto
+                    metadata["tipo"] = "fechas_ingreso"
+                    metadata.setdefault("carrera", carrera)
+                    if metadata.get("carrera"):
+                        metadata["carrera_slug"] = slugify(metadata["carrera"])
+
                 # limpiar None
                 metadata = {k: v for k, v in metadata.items() if v is not None}
 

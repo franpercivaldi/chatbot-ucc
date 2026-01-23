@@ -38,6 +38,14 @@ def ensure_schema():
         """)
         cx.commit()
 
+
+def _normalize_carrera_id(cid: str | None) -> str:
+    """Normaliza IDs numéricos a 4 dígitos (901 -> 0901)."""
+    s = (cid or "").strip()
+    if s.isdigit() and len(s) < 4:
+        return s.zfill(4)
+    return s
+
 def _merge_json_array(old: Optional[str], new_items: List[str]) -> str:
     base = []
     if old:
@@ -61,7 +69,7 @@ def upsert_from_records(records: List[Dict[str, Any]], bot_id: str):
         if dom not in {"carreras", "oferta", "aranceles", "perfiles"}:
             continue
 
-        carrera_id = (md.get("carrera_id") or "").strip()
+        carrera_id = _normalize_carrera_id(md.get("carrera_id"))
         if not carrera_id:
             # Sin carrera_id no podemos unificar; lo dejamos pasar para evitar ruido.
             continue
@@ -189,4 +197,8 @@ def resolve_carrera(bot_id: str, q: str, threshold: int = 68) -> Optional[Dict[s
     if not cands:
         return None
     best = cands[0]
-    return best if best["score"] >= threshold else None
+    if best["score"] < threshold:
+        return None
+    # normaliza ID antes de devolver
+    best["carrera_id"] = _normalize_carrera_id(best.get("carrera_id"))
+    return best

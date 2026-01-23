@@ -8,6 +8,7 @@ from ..catalog.entities import resolve_carrera
 from ..rag.retriever import search
 from ..rag.reranker import rerank
 from ..rag.prompts import build_prompt
+from ..rag.query_rewriter import rewrite_query
 from ..models.gemini_client import generate_answer, stream_answer
 from ..config import settings
 from ..session.store import load as load_ctx, save as save_ctx
@@ -88,7 +89,7 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
     allowed_org_units = (_parse_org_units_header(org_hdr) or ["general"]) if use_org_units else None
 
     # --- Intención, contexto, meta ---
-    intent_res = detect_intent(user_text)  # -> intent, ensure_domains
+    intent_res = detect_intent(user_text)
     ctx, history = load_ctx(session_id, bot_id)
     slot_carrera_id   = ctx.get("carrera_id")
     slot_carrera_name = ctx.get("carrera_nombre")
@@ -159,11 +160,50 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
         for dom in ("perfiles", "carreras"):
             if dom not in ensure_domains:
                 ensure_domains.append(dom)
+    if "fechas" in ensure_domains and "oferta" not in ensure_domains:
+        ensure_domains.append("oferta")
+    # Fechas suelen vivir en dominio oferta; añadimos alias de dominio
+    if "fechas" in ensure_domains and "oferta" not in ensure_domains:
+        ensure_domains.append("oferta")
+
+    # --- Rewriter: construir query explícita y filtros ---
+    rewrite_res = rewrite_query(
+        user_message=user_text,
+        intent=intent_res.intent,
+        meta=meta,
+        ctx_slots={
+            "carrera_id": ctx.get("carrera_id") or slot_carrera_id,
+            "carrera_nombre": ctx.get("carrera_nombre") or slot_carrera_name,
+            "periodo": ctx.get("periodo") or slot_periodo,
+            "modalidad": ctx.get("modalidad"),
+            "facultad": ctx.get("facultad") or slot_facultad,
+            "ultimo_intent": ctx.get("ultimo_intent"),
+            "ultimo_domain": ctx.get("ultimo_domain"),
+        },
+        history=history[-4:],
+    )
+
+    if rewrite_res.get("carrera_id"):
+        meta.carrera_id = rewrite_res.get("carrera_id")
+    if rewrite_res.get("carrera_nombre") and not meta.carrera:
+        meta.carrera = rewrite_res.get("carrera_nombre")
+    if rewrite_res.get("periodo") and not meta.periodo:
+        meta.periodo = rewrite_res.get("periodo")
+    if rewrite_res.get("modalidad") and not meta.modalidad:
+        meta.modalidad = rewrite_res.get("modalidad")
+
+    search_query = rewrite_res.get("search_query") or user_text
+    target_domain = rewrite_res.get("target_domain")
+    if target_domain and target_domain not in ensure_domains:
+        ensure_domains = [target_domain] + ensure_domains
+    # Regla dura: preguntas de montos deben forzar aranceles
+    if intent_res.intent == "montos" and "aranceles" not in ensure_domains:
+        ensure_domains = ["aranceles"] + ensure_domains
 
     try:
         # --- Retrieve con filtro por org_unit ---
         raw_hits = search(
-            client, user_text, meta=meta, top_k=settings.RAG_TOP_K,
+            client, search_query, meta=meta, top_k=settings.RAG_TOP_K,
             bot_id=bot_id, allowed_domains=allowed_domains,
             ensure_domains=ensure_domains,
             allowed_org_units=allowed_org_units,
@@ -188,6 +228,8 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
                 "domains": [],
                 "files": [],
                 "org_units": allowed_org_units,
+                "rewriter": rewrite_res,
+                "search_query": search_query,
             }
 
             # métricas
@@ -247,6 +289,10 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
             ctx["periodo"] = meta.periodo
         if meta.facultad:
             ctx["facultad"] = meta.facultad
+        if meta.modalidad:
+            ctx["modalidad"] = meta.modalidad
+        ctx["ultimo_intent"] = intent_res.intent
+        ctx["ultimo_domain"] = ensure_domains[0] if ensure_domains else None
 
         # --- Guardar historial ---
         history.append({"role":"user", "content": user_text})
@@ -265,6 +311,8 @@ def chat(req: ChatRequest, request: Request, client = Depends(get_qdrant)):
             "domains": dbg_domains,
             "files": dbg_files,
             "org_units": allowed_org_units,
+            "rewriter": rewrite_res,
+            "search_query": search_query,
         }
 
         # Éxito: si había dominios obligatorios por intención y no aparecieron, marcar False
@@ -439,9 +487,41 @@ def chat_stream(req: ChatRequest, request: Request, client = Depends(get_qdrant)
             if dom not in ensure_domains:
                 ensure_domains.append(dom)
 
+    rewrite_res = rewrite_query(
+        user_message=user_text,
+        intent=intent_res.intent,
+        meta=meta,
+        ctx_slots={
+            "carrera_id": ctx.get("carrera_id") or slot_carrera_id,
+            "carrera_nombre": ctx.get("carrera_nombre") or slot_carrera_name,
+            "periodo": ctx.get("periodo") or slot_periodo,
+            "modalidad": ctx.get("modalidad"),
+            "facultad": ctx.get("facultad") or slot_facultad,
+            "ultimo_intent": ctx.get("ultimo_intent"),
+            "ultimo_domain": ctx.get("ultimo_domain"),
+        },
+        history=history[-4:],
+    )
+
+    if rewrite_res.get("carrera_id"):
+        meta.carrera_id = rewrite_res.get("carrera_id")
+    if rewrite_res.get("carrera_nombre") and not meta.carrera:
+        meta.carrera = rewrite_res.get("carrera_nombre")
+    if rewrite_res.get("periodo") and not meta.periodo:
+        meta.periodo = rewrite_res.get("periodo")
+    if rewrite_res.get("modalidad") and not meta.modalidad:
+        meta.modalidad = rewrite_res.get("modalidad")
+
+    search_query = rewrite_res.get("search_query") or user_text
+    target_domain = rewrite_res.get("target_domain")
+    if target_domain and target_domain not in ensure_domains:
+        ensure_domains = [target_domain] + ensure_domains
+    if intent_res.intent == "montos" and "aranceles" not in ensure_domains:
+        ensure_domains = ["aranceles"] + ensure_domains
+
     try:
         raw_hits = search(
-            client, user_text, meta=meta, top_k=settings.RAG_TOP_K,
+            client, search_query, meta=meta, top_k=settings.RAG_TOP_K,
             bot_id=bot_id, allowed_domains=allowed_domains,
             ensure_domains=ensure_domains,
             allowed_org_units=allowed_org_units,
@@ -464,6 +544,8 @@ def chat_stream(req: ChatRequest, request: Request, client = Depends(get_qdrant)
                 "domains": [],
                 "files": [],
                 "org_units": allowed_org_units,
+                "rewriter": rewrite_res,
+                "search_query": search_query,
             }
 
             log_chat_event(
@@ -529,6 +611,8 @@ def chat_stream(req: ChatRequest, request: Request, client = Depends(get_qdrant)
             "domains": dbg_domains,
             "files": dbg_files,
             "org_units": allowed_org_units,
+            "rewriter": rewrite_res,
+            "search_query": search_query,
         }
 
         need = set(intent_res.ensure_domains or [])
@@ -555,6 +639,10 @@ def chat_stream(req: ChatRequest, request: Request, client = Depends(get_qdrant)
                     ctx["periodo"] = meta.periodo
                 if meta.facultad:
                     ctx["facultad"] = meta.facultad
+                if meta.modalidad:
+                    ctx["modalidad"] = meta.modalidad
+                ctx["ultimo_intent"] = intent_res.intent
+                ctx["ultimo_domain"] = ensure_domains[0] if ensure_domains else None
 
                 history.append({"role":"user", "content": user_text})
                 history.append({"role":"assistant", "content": full_answer[:1200]})
